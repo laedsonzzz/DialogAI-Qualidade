@@ -238,7 +238,7 @@ const Index = () => {
                       <div className="space-y-3">
                         <h4 className="font-semibold text-foreground">Cenários disponíveis:</h4>
                         <ul className="list-disc list-inside space-y-2 text-muted-foreground">
-                          <li><strong>Aumento de Limite:</strong> Lidando com solicitações de crédito</li>
+                          <li>Aumento de Limite: Lidando com solicitações de crédito</li>
                           <li><strong>Contestação de Cobrança:</strong> Resolvendo disputas e cobranças não reconhecidas</li>
                           <li><strong>Problema com Cartão:</strong> Assistência com cartões bloqueados ou não recebidos</li>
                           <li><strong>Solicitação de Crédito:</strong> Orientação sobre empréstimos e produtos financeiros</li>
@@ -313,7 +313,7 @@ const Index = () => {
                       <div className="space-y-3">
                         <h4 className="font-semibold text-foreground">Tecnologia:</h4>
                         <p>
-                          Powered by Lovable AI, nosso sistema utiliza modelos de linguagem de última geração 
+                          Powered by Diva AI, nosso sistema utiliza modelos de linguagem de última geração 
                           para proporcionar conversas que parecem naturais e imprevisíveis, assim como interações reais.
                         </p>
                       </div>

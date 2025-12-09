@@ -50,7 +50,7 @@ export type Database = {
         }
         Relationships: [
           {
-            foreignKeyName: "conversations_process_id_fkey"
+            foreignKeyName: true
             columns: ["process_id"]
             isOneToOne: false
             referencedRelation: "knowledge_base"
