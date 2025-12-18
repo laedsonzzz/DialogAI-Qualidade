@@ -1,3 +1,4 @@
+/* @ts-nocheck */
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
 const corsHeaders = {
@@ -5,7 +6,7 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-serve(async (req) => {
+serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
@@ -13,9 +14,12 @@ serve(async (req) => {
   try {
     const { transcript, scenario, customerProfile } = await req.json();
     
-    const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
-    if (!LOVABLE_API_KEY) {
-      throw new Error("LOVABLE_API_KEY is not configured");
+    const AZURE_OPENAI_ENDPOINT = Deno.env.get("AZURE_OPENAI_ENDPOINT_1");
+    const AZURE_OPENAI_API_KEY = Deno.env.get("AZURE_OPENAI_API_KEY_1");
+    const AZURE_OPENAI_API_VERSION = Deno.env.get("AZURE_OPENAI_API_VERSION_1");
+    const AZURE_OPENAI_DEPLOYMENT = Deno.env.get("AZURE_OPENAI_DEPLOYMENT_NAME_1");
+    if (!AZURE_OPENAI_ENDPOINT || !AZURE_OPENAI_API_KEY || !AZURE_OPENAI_API_VERSION || !AZURE_OPENAI_DEPLOYMENT) {
+      throw new Error("Azure OpenAI environment variables are not configured");
     }
 
     // System prompt for evaluation
@@ -57,16 +61,17 @@ FORMATO DA RESPOSTA (JSON):
   "resumo": "Resumo geral da avaliação em 2-3 frases"
 }`;
 
-    const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+    const url = AZURE_OPENAI_ENDPOINT + "openai/deployments/" + AZURE_OPENAI_DEPLOYMENT + "/responses?api-version=" + AZURE_OPENAI_API_VERSION;
+
+    const response = await fetch(url, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${LOVABLE_API_KEY}`,
+        "api-key": AZURE_OPENAI_API_KEY!,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "google/gemini-2.5-flash",
         messages: [
-          { role: "user", content: evaluationPrompt },
+          { role: "user", content: [{ type: "text", text: evaluationPrompt }] },
         ],
       }),
     });
@@ -84,19 +89,29 @@ FORMATO DA RESPOSTA (JSON):
           { status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
+      const errorText = await response.text();
+      console.error("Azure OpenAI error:", response.status, errorText);
       throw new Error("Erro ao comunicar com a IA");
     }
 
     const data = await response.json();
-    let aiResponse = data.choices[0].message.content;
-
-    // Extract JSON from response (handle markdown code blocks)
-    const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      aiResponse = jsonMatch[0];
+    // Extrai texto da resposta do Azure Responses API
+    let aiText = "";
+    if (data.output_text && typeof data.output_text === "string") {
+      aiText = data.output_text;
+    } else if (Array.isArray(data.output) && data.output.length > 0) {
+      const contentParts = data.output[0]?.content ?? [];
+      aiText = contentParts.map((p: any) => p.text ?? "").join("");
+    } else if (data.choices && data.choices[0]?.message?.content) {
+      // Fallback de compatibilidade
+      aiText = data.choices[0].message.content;
     }
 
-    const evaluation = JSON.parse(aiResponse);
+    // Extrai JSON da resposta (suporta blocos markdown)
+    const jsonMatch = aiText.match(/\{[\s\S]*\}/);
+    const jsonText = jsonMatch ? jsonMatch[0] : aiText;
+
+    const evaluation = JSON.parse(jsonText);
 
     return new Response(
       JSON.stringify(evaluation),

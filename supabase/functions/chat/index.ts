@@ -1,3 +1,4 @@
+/* @ts-nocheck */
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
 const corsHeaders = {
@@ -5,7 +6,7 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-serve(async (req) => {
+serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
@@ -13,9 +14,12 @@ serve(async (req) => {
   try {
     const { messages, scenario, customerProfile, processId } = await req.json();
     
-    const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
-    if (!LOVABLE_API_KEY) {
-      throw new Error("LOVABLE_API_KEY is not configured");
+    const AZURE_OPENAI_ENDPOINT = Deno.env.get("AZURE_OPENAI_ENDPOINT_1");
+    const AZURE_OPENAI_API_KEY = Deno.env.get("AZURE_OPENAI_API_KEY_1");
+    const AZURE_OPENAI_API_VERSION = Deno.env.get("AZURE_OPENAI_API_VERSION_1");
+    const AZURE_OPENAI_DEPLOYMENT = Deno.env.get("AZURE_OPENAI_DEPLOYMENT_NAME_1");
+    if (!AZURE_OPENAI_ENDPOINT || !AZURE_OPENAI_API_KEY || !AZURE_OPENAI_API_VERSION || !AZURE_OPENAI_DEPLOYMENT) {
+      throw new Error("Azure OpenAI environment variables are not configured");
     }
 
     // Fetch process content if processId is provided
@@ -59,18 +63,25 @@ INSTRUÇÕES IMPORTANTES:
 - Não revele que é uma IA
 - Mantenha respostas concisas (máximo 3-4 frases)${processContent ? "\n- Base suas expectativas e respostas no processo operacional fornecido acima" : ""}`;
 
-    const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+    // Map messages to Azure Responses format (content parts)
+    const azureMessages = [
+      { role: "system", content: [{ type: "text", text: systemPrompt }] },
+      ...messages.map((m: { role: string; content: string }) => ({
+        role: m.role,
+        content: [{ type: "text", text: m.content }]
+      }))
+    ];
+
+    const url = AZURE_OPENAI_ENDPOINT + "openai/deployments/" + AZURE_OPENAI_DEPLOYMENT + "/responses?api-version=" + AZURE_OPENAI_API_VERSION;
+
+    const response = await fetch(url, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${LOVABLE_API_KEY}`,
+        "api-key": AZURE_OPENAI_API_KEY!,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "google/gemini-2.5-flash",
-        messages: [
-          { role: "system", content: systemPrompt },
-          ...messages,
-        ],
+        messages: azureMessages,
       }),
     });
 
@@ -88,12 +99,23 @@ INSTRUÇÕES IMPORTANTES:
         );
       }
       const errorText = await response.text();
-      console.error("AI gateway error:", response.status, errorText);
+      console.error("Azure OpenAI error:", response.status, errorText);
       throw new Error("Erro ao comunicar com a IA");
     }
 
     const data = await response.json();
-    const aiMessage = data.choices[0].message.content;
+
+    // Robust parsing for Azure Responses API
+    let aiMessage = "";
+    if (data.output_text && typeof data.output_text === "string") {
+      aiMessage = data.output_text;
+    } else if (Array.isArray(data.output) && data.output.length > 0) {
+      const contentParts = data.output[0]?.content ?? [];
+      aiMessage = contentParts.map((p: any) => p.text ?? "").join("");
+    } else if (data.choices && data.choices[0]?.message?.content) {
+      // Fallback for compatibility with legacy shapes
+      aiMessage = data.choices[0].message.content;
+    }
 
     return new Response(
       JSON.stringify({ message: aiMessage }),
