@@ -9,7 +9,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql
       - ./db/migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dialogai} -d ${POSTGRES_DB:-dialogai}"]
@@ -22,11 +22,22 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        HTTP_PROXY: http://192.168.239.14:8080
+        HTTPS_PROXY: http://192.168.239.14:8080
+        NO_PROXY: localhost,127.0.0.1,::1,.grupoaec.com.br
     container_name: dialogai_app
     environment:
       PORT: 3000
+      HTTP_PROXY: http://192.168.239.14:8080
+      HTTPS_PROXY: http://192.168.239.14:8080
+      http_proxy: http://192.168.239.14:8080
+      https_proxy: http://192.168.239.14:8080
+      NO_PROXY: localhost,127.0.0.1,::1,postgres,.grupoaec.com.br
+      
       # Database connection passed from .env
       DATABASE_URL: ${DATABASE_URL}
+      
       # Azure OpenAI (from .env)
       AZURE_OPENAI_ENDPOINT_1: ${AZURE_OPENAI_ENDPOINT_1}
       AZURE_OPENAI_API_KEY_1: ${AZURE_OPENAI_API_KEY_1}

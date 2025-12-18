@@ -2,6 +2,14 @@
 # Base images
 FROM node:20-alpine AS base
 
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+
+ENV HTTP_PROXY=${HTTP_PROXY}
+ENV HTTPS_PROXY=${HTTPS_PROXY}
+ENV NO_PROXY=${NO_PROXY}
+
 # Builder stage
 FROM base AS builder
 WORKDIR /app
@@ -24,7 +32,7 @@ RUN npm ci --omit=dev
 
 # Copy server and built frontend
 COPY server/ ./server/
-COPY dist/ ./dist/
+COPY --from=builder /app/dist ./dist/
 
 # Expose port
 ENV PORT=3000
