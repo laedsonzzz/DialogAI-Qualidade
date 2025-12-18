@@ -2,14 +2,13 @@ import { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { ArrowLeft, Send, Loader2, Mic, MicOff, MessageSquare } from "lucide-react";
-import { supabase } from "@/integrations/supabase/client";
+import { ArrowLeft, Send, Loader2, Mic, MessageSquare } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useSpeechRecognition } from "@/hooks/useSpeechRecognition";
 import EvaluationResults from "./EvaluationResults";
 
 interface Message {
-  role: 'user' | 'assistant';
+  role: "user" | "assistant";
   content: string;
 }
 
@@ -34,17 +33,13 @@ const ChatInterface = ({ scenario, customerProfile, processId, onBack }: ChatInt
   const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
   const micButtonRef = useRef<HTMLButtonElement>(null);
   const { toast } = useToast();
-  const { 
-    isListening, 
-    transcript, 
-    isSupported, 
-    startListening, 
-    stopListening,
-    resetTranscript 
-  } = useSpeechRecognition();
+  const { isListening, transcript, isSupported, startListening, stopListening, resetTranscript } = useSpeechRecognition();
+
+  const API_BASE = import.meta.env?.VITE_API_BASE_URL || "";
 
   useEffect(() => {
     startConversation();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -53,7 +48,6 @@ const ChatInterface = ({ scenario, customerProfile, processId, onBack }: ChatInt
 
   useEffect(() => {
     if (transcript && !isListening && isRecording) {
-      console.log('Transcript captured:', transcript);
       setInput(transcript);
       handleRecordingComplete();
     }
@@ -78,23 +72,21 @@ const ChatInterface = ({ scenario, customerProfile, processId, onBack }: ChatInt
 
   const startRecording = () => {
     if (isLoading) return;
-    
+
     setIsRecording(true);
     setRecordingTime(0);
     resetTranscript();
     startListening();
-    
+
     recordingTimerRef.current = setInterval(() => {
-      setRecordingTime(prev => prev + 1);
+      setRecordingTime((prev) => prev + 1);
     }, 1000);
   };
 
   const stopRecording = () => {
     if (!isRecording) return;
-    
-    console.log('Stopping recording, current transcript:', transcript);
     stopListening();
-    
+
     // Wait a bit for the final transcript to be processed
     setTimeout(() => {
       if (transcript) {
@@ -106,12 +98,12 @@ const ChatInterface = ({ scenario, customerProfile, processId, onBack }: ChatInt
 
   const cancelRecording = () => {
     if (!isRecording) return;
-    
+
     stopListening();
     resetTranscript();
     setInput("");
     handleRecordingComplete();
-    
+
     toast({
       title: "Gravação cancelada",
       variant: "default",
@@ -165,44 +157,43 @@ const ChatInterface = ({ scenario, customerProfile, processId, onBack }: ChatInt
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
+  async function apiPost<T>(path: string, body: any): Promise<T> {
+    const res = await fetch(`${API_BASE}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text || `Erro HTTP ${res.status}`);
+    }
+    return res.json();
+  }
+
   const startConversation = async () => {
     setIsLoading(true);
     try {
-      const { data: conv, error: convError } = await supabase
-        .from('conversations')
-        .insert({
-          scenario,
-          customer_profile: customerProfile,
-          transcript: JSON.stringify([]),
-          process_id: processId || null,
-        })
-        .select()
-        .single();
-
-      if (convError) throw convError;
+      // Create conversation
+      const conv = await apiPost<{ id: string }>("/api/conversations", {
+        scenario,
+        customerProfile,
+        processId: processId || null,
+      });
       setConversationId(conv.id);
 
-      const { data, error } = await supabase.functions.invoke('chat', {
-        body: {
-          messages: [],
-          scenario,
-          customerProfile,
-          processId: processId || null,
-        },
+      // Initial assistant message
+      const data = await apiPost<{ message: string }>("/api/chat", {
+        messages: [],
+        scenario,
+        customerProfile,
+        processId: processId || null,
+        conversationId: conv.id,
       });
 
-      if (error) throw error;
-
-      const aiMessage: Message = { role: 'assistant', content: data.message };
+      const aiMessage: Message = { role: "assistant", content: data.message };
       setMessages([aiMessage]);
-
-      await supabase
-        .from('conversations')
-        .update({ transcript: JSON.stringify([aiMessage]) })
-        .eq('id', conv.id);
-
     } catch (error: any) {
-      console.error('Error starting conversation:', error);
+      console.error("Error starting conversation:", error);
       toast({
         title: "Erro",
         description: error.message || "Não foi possível iniciar a conversa",
@@ -216,37 +207,26 @@ const ChatInterface = ({ scenario, customerProfile, processId, onBack }: ChatInt
   const sendMessage = async () => {
     if (!input.trim() || isLoading) return;
 
-    const userMessage: Message = { role: 'user', content: input };
+    const userMessage: Message = { role: "user", content: input };
     const updatedMessages = [...messages, userMessage];
     setMessages(updatedMessages);
     setInput("");
     setIsLoading(true);
 
     try {
-      const { data, error } = await supabase.functions.invoke('chat', {
-        body: {
-          messages: updatedMessages,
-          scenario,
-          customerProfile,
-          processId: processId || null,
-        },
+      const data = await apiPost<{ message: string }>("/api/chat", {
+        messages: updatedMessages,
+        scenario,
+        customerProfile,
+        processId: processId || null,
+        conversationId,
       });
 
-      if (error) throw error;
-
-      const aiMessage: Message = { role: 'assistant', content: data.message };
+      const aiMessage: Message = { role: "assistant", content: data.message };
       const finalMessages = [...updatedMessages, aiMessage];
       setMessages(finalMessages);
-
-      if (conversationId) {
-        await supabase
-          .from('conversations')
-          .update({ transcript: JSON.stringify(finalMessages) })
-          .eq('id', conversationId);
-      }
-
     } catch (error: any) {
-      console.error('Error sending message:', error);
+      console.error("Error sending message:", error);
       toast({
         title: "Erro",
         description: error.message || "Não foi possível enviar a mensagem",
@@ -269,33 +249,17 @@ const ChatInterface = ({ scenario, customerProfile, processId, onBack }: ChatInt
 
     setIsLoading(true);
     try {
-      const { data, error } = await supabase.functions.invoke('evaluate', {
-        body: {
-          transcript: messages,
-          scenario,
-          customerProfile,
-        },
+      const data = await apiPost<any>("/api/evaluate", {
+        transcript: messages,
+        scenario,
+        customerProfile,
+        conversationId,
       });
 
-      if (error) throw error;
-
       setEvaluation(data);
-
-      if (conversationId) {
-        await supabase
-          .from('conversations')
-          .update({
-            ended_at: new Date().toISOString(),
-            csat_score: data.csat,
-            feedback: JSON.stringify(data),
-          })
-          .eq('id', conversationId);
-      }
-
       setShowEvaluation(true);
-
     } catch (error: any) {
-      console.error('Error evaluating conversation:', error);
+      console.error("Error evaluating conversation:", error);
       toast({
         title: "Erro",
         description: error.message || "Não foi possível avaliar a conversa",
@@ -350,13 +314,15 @@ const ChatInterface = ({ scenario, customerProfile, processId, onBack }: ChatInt
             {messages.map((message, index) => (
               <div
                 key={index}
-                className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'} animate-fade-in`}
+                className={`flex ${message.role === "user" ? "justify-end" : "justify-start"} animate-fade-in`}
               >
-                <div className={`flex items-end gap-2 max-w-[80%] ${message.role === 'user' ? 'flex-row-reverse' : 'flex-row'}`}>
-                  <div className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${
-                    message.role === 'user' ? 'bg-gradient-primary shadow-glow' : 'bg-muted'
-                  }`}>
-                    {message.role === 'user' ? (
+                <div className={`flex items-end gap-2 max-w-[80%] ${message.role === "user" ? "flex-row-reverse" : "flex-row"}`}>
+                  <div
+                    className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${
+                      message.role === "user" ? "bg-gradient-primary shadow-glow" : "bg-muted"
+                    }`}
+                  >
+                    {message.role === "user" ? (
                       <span className="text-white text-sm font-bold">Eu</span>
                     ) : (
                       <MessageSquare className="w-4 h-4 text-muted-foreground" />
@@ -364,9 +330,7 @@ const ChatInterface = ({ scenario, customerProfile, processId, onBack }: ChatInt
                   </div>
                   <Card
                     className={`p-4 shadow-elegant transition-all hover:shadow-glow ${
-                      message.role === 'user'
-                        ? 'bg-gradient-primary text-white border-0'
-                        : 'bg-card border-border/50'
+                      message.role === "user" ? "bg-gradient-primary text-white border-0" : "bg-card border-border/50"
                     }`}
                   >
                     <p className="text-sm leading-relaxed">{message.content}</p>
@@ -400,17 +364,19 @@ const ChatInterface = ({ scenario, customerProfile, processId, onBack }: ChatInt
               ⚠️ Reconhecimento de voz não disponível neste navegador
             </div>
           )}
-          
+
           {isRecording && (
             <div className="mb-3 flex items-center justify-center gap-3 text-sm bg-destructive/10 p-3 rounded-lg">
               <div className="flex items-center gap-2 text-destructive animate-pulse">
                 <div className="w-3 h-3 rounded-full bg-destructive shadow-glow" />
-                <span className="font-medium">{new Date(recordingTime * 1000).toISOString().substr(14, 5)}</span>
+                <span className="font-medium">
+                  {new Date(recordingTime * 1000).toISOString().substr(14, 5)}
+                </span>
               </div>
               <span className="text-muted-foreground">Deslize para cima para cancelar</span>
             </div>
           )}
-          
+
           <div className="flex gap-2">
             {isSupported && (
               <div className="relative">
@@ -425,9 +391,7 @@ const ChatInterface = ({ scenario, customerProfile, processId, onBack }: ChatInt
                   onTouchMove={handleTouchMove}
                   disabled={isLoading}
                   variant={isRecording ? "destructive" : "outline"}
-                  className={`touch-none select-none transition-all ${
-                    isRecording ? "scale-110 animate-pulse shadow-lg" : ""
-                  }`}
+                  className={`touch-none select-none transition-all ${isRecording ? "scale-110 animate-pulse shadow-lg" : ""}`}
                   size="icon"
                 >
                   <Mic className="w-4 h-4" />
@@ -437,7 +401,7 @@ const ChatInterface = ({ scenario, customerProfile, processId, onBack }: ChatInt
             <Input
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              onKeyPress={(e) => e.key === 'Enter' && !isRecording && sendMessage()}
+              onKeyPress={(e) => e.key === "Enter" && !isRecording && sendMessage()}
               placeholder={isRecording ? "Gravando áudio..." : "Digite ou segure o microfone para falar..."}
               disabled={isLoading || isRecording}
               className="flex-1"

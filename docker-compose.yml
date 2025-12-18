@@ -1,0 +1,42 @@
+services:
+  postgres:
+    image: postgres:18.1
+    container_name: dialogai_postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-dialogai}
+      POSTGRES_USER: ${POSTGRES_USER:-dialogai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dialogai_secret}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dialogai} -d ${POSTGRES_DB:-dialogai}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dialogai_app
+    environment:
+      PORT: 3000
+      # Database connection passed from .env
+      DATABASE_URL: ${DATABASE_URL}
+      # Azure OpenAI (from .env)
+      AZURE_OPENAI_ENDPOINT_1: ${AZURE_OPENAI_ENDPOINT_1}
+      AZURE_OPENAI_API_KEY_1: ${AZURE_OPENAI_API_KEY_1}
+      AZURE_OPENAI_API_VERSION_1: ${AZURE_OPENAI_API_VERSION_1}
+      AZURE_OPENAI_DEPLOYMENT_NAME_1: ${AZURE_OPENAI_DEPLOYMENT_NAME_1}
+    depends_on:
+      - postgres
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+volumes:
+  pgdata:

@@ -1,5 +1,4 @@
 import { useState, useEffect } from "react";
-import { supabase } from "@/integrations/supabase/client";
 import { Button } from "./ui/button";
 import { Textarea } from "./ui/textarea";
 import { Input } from "./ui/input";
@@ -12,6 +11,8 @@ interface KnowledgeEntry {
   title: string;
   category: string;
   content: string;
+  created_at?: string;
+  updated_at?: string;
 }
 
 export const KnowledgeBaseManager = () => {
@@ -22,75 +23,98 @@ export const KnowledgeBaseManager = () => {
   const [content, setContent] = useState("");
   const { toast } = useToast();
 
+  const API_BASE = import.meta.env?.VITE_API_BASE_URL || "";
+
   useEffect(() => {
     loadEntries();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const loadEntries = async () => {
-    const { data, error } = await supabase
-      .from("knowledge_base")
-      .select("*")
-      .order("created_at", { ascending: false });
+  async function apiGet<T>(path: string): Promise<T> {
+    const res = await fetch(`${API_BASE}${path}`);
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text || `Erro HTTP ${res.status}`);
+    }
+    return res.json();
+  }
 
-    if (error) {
+  async function apiPost<T>(path: string, body: any): Promise<T> {
+    const res = await fetch(`${API_BASE}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text || `Erro HTTP ${res.status}`);
+    }
+    return res.json();
+  }
+
+  async function apiDelete<T>(path: string): Promise<T> {
+    const res = await fetch(`${API_BASE}${path}`, { method: "DELETE" });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text || `Erro HTTP ${res.status}`);
+    }
+    return res.json();
+  }
+
+  const loadEntries = async () => {
+    try {
+      const data = await apiGet<KnowledgeEntry[]>("/api/knowledge_base");
+      setEntries(data || []);
+    } catch (error: any) {
       toast({
         title: "Erro ao carregar processos",
         description: error.message,
         variant: "destructive",
       });
-      return;
     }
-
-    setEntries(data || []);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    const { error } = await supabase.from("knowledge_base").insert({
-      title,
-      category,
-      content,
-    });
+    try {
+      await apiPost("/api/knowledge_base", {
+        title,
+        category,
+        content,
+      });
 
-    if (error) {
+      toast({
+        title: "Processo salvo com sucesso!",
+        description: "O processo está disponível para uso nas simulações.",
+      });
+
+      setTitle("");
+      setCategory("");
+      setContent("");
+      setShowForm(false);
+      loadEntries();
+    } catch (error: any) {
       toast({
         title: "Erro ao salvar processo",
         description: error.message,
         variant: "destructive",
       });
-      return;
     }
-
-    toast({
-      title: "Processo salvo com sucesso!",
-      description: "O processo está disponível para uso nas simulações.",
-    });
-
-    setTitle("");
-    setCategory("");
-    setContent("");
-    setShowForm(false);
-    loadEntries();
   };
 
   const handleDelete = async (id: string) => {
-    const { error } = await supabase.from("knowledge_base").delete().eq("id", id);
-
-    if (error) {
+    try {
+      await apiDelete(`/api/knowledge_base/${id}`);
+      toast({ title: "Processo excluído" });
+      loadEntries();
+    } catch (error: any) {
       toast({
         title: "Erro ao excluir processo",
         description: error.message,
         variant: "destructive",
       });
-      return;
     }
-
-    toast({
-      title: "Processo excluído",
-    });
-
-    loadEntries();
   };
 
   return (
