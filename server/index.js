@@ -199,6 +199,26 @@ app.use('/api', (req, _res, next) => {
   next();
 });
 
+// Azure debug endpoints
+app.get('/api/azure/deployments', async (_req, res) => {
+  try {
+    assertAzureEnv();
+    const url = new URL(`openai/deployments?api-version=${AZURE_OPENAI_API_VERSION}`, AZURE_OPENAI_ENDPOINT).toString();
+    const r = await fetchWithProxy(url, {
+      method: 'GET',
+      headers: {
+        'api-key': AZURE_OPENAI_API_KEY,
+        'Content-Type': 'application/json',
+      },
+    });
+    const body = await r.text();
+    res.status(r.status).type('application/json').send(body);
+  } catch (e) {
+    console.error('Azure deployments debug error:', e);
+    res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
 // Create conversation
 app.post('/api/conversations', async (req, res) => {
   try {
