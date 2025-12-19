@@ -34,6 +34,16 @@ function assertAzureEnv() {
   }
 }
 
+// Feature flags / debug
+const AZURE_USE_CHAT_COMPLETIONS = (process.env.AZURE_USE_CHAT_COMPLETIONS || 'false').toLowerCase() === 'true';
+const SSL_INSECURE_SKIP_VERIFY = (process.env.SSL_INSECURE_SKIP_VERIFY || 'false').toLowerCase() === 'true';
+if (SSL_INSECURE_SKIP_VERIFY) {
+  // Debug only: desabilita verificação de certificado TLS (risco de segurança!)
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+  console.warn('SSL/TLS verification disabled via SSL_INSECURE_SKIP_VERIFY=true. Use only for debugging.');
+}
+
+
 // Proxy env (supports uppercase/lowercase)
 const PROXY_URL =
   process.env.HTTPS_PROXY ||
@@ -67,22 +77,30 @@ async function fetchWithProxy(url, options = {}) {
 
 async function azureResponses(messages) {
   assertAzureEnv();
-  const url = new URL(
-    `openai/deployments/${AZURE_OPENAI_DEPLOYMENT}/responses?api-version=${AZURE_OPENAI_API_VERSION}`,
-    AZURE_OPENAI_ENDPOINT
-  ).toString();
+  const basePath = AZURE_USE_CHAT_COMPLETIONS
+    ? `openai/deployments/${AZURE_OPENAI_DEPLOYMENT}/chat/completions?api-version=${AZURE_OPENAI_API_VERSION}`
+    : `openai/deployments/${AZURE_OPENAI_DEPLOYMENT}/responses?api-version=${AZURE_OPENAI_API_VERSION}`;
+  const url = new URL(basePath, AZURE_OPENAI_ENDPOINT).toString();
 
   // Debug: detalhes da chamada ao Azure (sem chaves)
   const bypass = shouldBypassProxy(url);
-  console.log(`[Azure] url=${url} endpoint=${AZURE_OPENAI_ENDPOINT} deployment=${AZURE_OPENAI_DEPLOYMENT} version=${AZURE_OPENAI_API_VERSION} proxy=${PROXY_URL || 'none'} bypass=${bypass}`);
+  const route = AZURE_USE_CHAT_COMPLETIONS ? 'chat/completions' : 'responses';
+  console.log(`[Azure] url=${url} route=${route} endpoint=${AZURE_OPENAI_ENDPOINT} deployment=${AZURE_OPENAI_DEPLOYMENT} version=${AZURE_OPENAI_API_VERSION} proxy=${PROXY_URL || 'none'} bypass=${bypass}`);
  
+  const outMessages = AZURE_USE_CHAT_COMPLETIONS
+    ? (messages || []).map((m) => ({
+        role: m.role,
+        content: Array.isArray(m.content) ? m.content.map((p) => p?.text ?? '').join('') : m.content,
+      }))
+    : messages;
+
   const resp = await fetchWithProxy(url, {
     method: 'POST',
     headers: {
       'api-key': AZURE_OPENAI_API_KEY,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ messages }),
+    body: JSON.stringify({ messages: outMessages }),
   });
 
   if (!resp.ok) {
@@ -95,10 +113,55 @@ async function azureResponses(messages) {
     const msg = parsed?.error?.message;
     console.error('Azure OpenAI error:', resp.status, msg || txt, { code });
     const status = resp.status;
+
     if (status === 404) {
       // 404 geralmente indica endpoint sem barra final, deployment inexistente, ou API version incompatível
       console.error('Diagnóstico 404: verifique AZURE_OPENAI_ENDPOINT (barra final), AZURE_OPENAI_DEPLOYMENT_NAME_1 (nome do deployment no Azure) e AZURE_OPENAI_API_VERSION_1 (suporte à Responses API). URL usada:', url);
+
+      // Fallback automático: tentar chat/completions com o mesmo deployment e api-version
+      try {
+        const chatUrl = new URL(
+          `openai/deployments/${AZURE_OPENAI_DEPLOYMENT}/chat/completions?api-version=${AZURE_OPENAI_API_VERSION}`,
+          AZURE_OPENAI_ENDPOINT
+        ).toString();
+
+        // Converter mensagens do formato Responses (content parts) para chat/completions (content string)
+        const chatMessages = (messages || []).map((m) => ({
+          role: m.role,
+          content: Array.isArray(m.content) ? m.content.map((p) => p?.text ?? '').join('') : m.content,
+        }));
+
+        console.log(`[Azure Fallback] chat/completions url=${chatUrl} deployment=${AZURE_OPENAI_DEPLOYMENT} version=${AZURE_OPENAI_API_VERSION}`);
+
+        const chatResp = await fetchWithProxy(chatUrl, {
+          method: 'POST',
+          headers: {
+            'api-key': AZURE_OPENAI_API_KEY,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ messages: chatMessages }),
+        });
+
+        if (!chatResp.ok) {
+          const cTxt = await chatResp.text();
+          console.error('Azure ChatCompletions error:', chatResp.status, cTxt);
+          throw Object.assign(new Error('Erro ao comunicar com a IA (fallback chat/completions)'), {
+            status: chatResp.status,
+            details: cTxt,
+          });
+        }
+
+        const cData = await chatResp.json();
+        if (cData?.choices && cData.choices[0]?.message?.content) {
+          return cData.choices[0].message.content;
+        }
+        // Retorno genérico caso formato difira
+        return typeof cData === 'string' ? cData : JSON.stringify(cData);
+      } catch (fbErr) {
+        console.error('Fallback chat/completions failed:', fbErr);
+      }
     }
+
     if (status === 429) {
       throw Object.assign(new Error('Limite de requisições excedido.'), { status });
     }

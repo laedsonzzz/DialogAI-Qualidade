@@ -46,6 +46,12 @@ services:
       AZURE_OPENAI_API_KEY_1: ${AZURE_OPENAI_API_KEY_1}
       AZURE_OPENAI_API_VERSION_1: ${AZURE_OPENAI_API_VERSION_1}
       AZURE_OPENAI_DEPLOYMENT_NAME_1: ${AZURE_OPENAI_DEPLOYMENT_NAME_1}
+
+      # Feature flags
+      # Force using chat/completions instead of responses (set to "true" if your resource/version doesn't support Responses API)
+      AZURE_USE_CHAT_COMPLETIONS: ${AZURE_USE_CHAT_COMPLETIONS:-false}
+      # Debug only: disable TLS verification if a corporate MITM breaks TLS (NOT recommended for production)
+      SSL_INSECURE_SKIP_VERIFY: "true"
     depends_on:
       - postgres
     ports:
