@@ -69,17 +69,25 @@ const Index = () => {
   const [processes, setProcesses] = useState<KnowledgeEntry[]>([]);
   const [activeTab, setActiveTab] = useState<string>("simulate");
 
+  const API_BASE = import.meta.env?.VITE_API_BASE_URL || "";
+
   useEffect(() => {
     loadProcesses();
   }, []);
 
   const loadProcesses = async () => {
-    const { data } = await supabase
-      .from("knowledge_base")
-      .select("id, title, category")
-      .order("created_at", { ascending: false });
-    
-    setProcesses(data || []);
+    try {
+      const res = await fetch(`${API_BASE}/api/knowledge_base`);
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || `Erro HTTP ${res.status}`);
+      }
+      const data: KnowledgeEntry[] = await res.json();
+      setProcesses(data || []);
+    } catch (error) {
+      console.error("Erro ao carregar processos:", error);
+      setProcesses([]);
+    }
   };
 
   const handleStartTraining = () => {
