@@ -67,13 +67,15 @@ async function fetchWithProxy(url, options = {}) {
 
 async function azureResponses(messages) {
   assertAzureEnv();
-  const url =
-    AZURE_OPENAI_ENDPOINT +
-    'openai/deployments/' +
-    AZURE_OPENAI_DEPLOYMENT +
-    '/responses?api-version=' +
-    AZURE_OPENAI_API_VERSION;
+  const url = new URL(
+    `openai/deployments/${AZURE_OPENAI_DEPLOYMENT}/responses?api-version=${AZURE_OPENAI_API_VERSION}`,
+    AZURE_OPENAI_ENDPOINT
+  ).toString();
 
+  // Debug: detalhes da chamada ao Azure (sem chaves)
+  const bypass = shouldBypassProxy(url);
+  console.log(`[Azure] url=${url} endpoint=${AZURE_OPENAI_ENDPOINT} deployment=${AZURE_OPENAI_DEPLOYMENT} version=${AZURE_OPENAI_API_VERSION} proxy=${PROXY_URL || 'none'} bypass=${bypass}`);
+ 
   const resp = await fetchWithProxy(url, {
     method: 'POST',
     headers: {
@@ -85,15 +87,25 @@ async function azureResponses(messages) {
 
   if (!resp.ok) {
     const txt = await resp.text();
-    console.error('Azure OpenAI error:', resp.status, txt);
+    let parsed;
+    try {
+      parsed = JSON.parse(txt);
+    } catch {}
+    const code = parsed?.error?.code;
+    const msg = parsed?.error?.message;
+    console.error('Azure OpenAI error:', resp.status, msg || txt, { code });
     const status = resp.status;
+    if (status === 404) {
+      // 404 geralmente indica endpoint sem barra final, deployment inexistente, ou API version incompatível
+      console.error('Diagnóstico 404: verifique AZURE_OPENAI_ENDPOINT (barra final), AZURE_OPENAI_DEPLOYMENT_NAME_1 (nome do deployment no Azure) e AZURE_OPENAI_API_VERSION_1 (suporte à Responses API). URL usada:', url);
+    }
     if (status === 429) {
       throw Object.assign(new Error('Limite de requisições excedido.'), { status });
     }
     if (status === 402) {
       throw Object.assign(new Error('Créditos insuficientes.'), { status });
     }
-    throw Object.assign(new Error('Erro ao comunicar com a IA'), { status });
+    throw Object.assign(new Error('Erro ao comunicar com a IA'), { status, details: msg || txt });
   }
 
   const data = await resp.json();
