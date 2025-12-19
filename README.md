@@ -91,12 +91,32 @@ A API do backend está implementada em [server/index.js](server/index.js:1):
     - Remove entrada por id
 
 6. Integração com Azure OpenAI
-- A chamada para Azure Responses é feita via [fetch()](server/index.js:51) usando headers com ["api-key"](server/index.js:61)
+- A chamada para Azure Responses é feita via [fetchWithProxy()](server/index.js) usando undici [ProxyAgent](server/index.js) quando HTTP(S) proxy está configurado; caso contrário, utiliza [fetch()](server/index.js). Os headers incluem ["api-key"](server/index.js).
 - URL construída como: {AZURE_OPENAI_ENDPOINT_1}/openai/deployments/{AZURE_OPENAI_DEPLOYMENT_NAME_1}/responses?api-version={AZURE_OPENAI_API_VERSION_1}
 - Parsing robusto da resposta:
   - Prioriza output_text
   - Fallback em output[0].content[].text
   - Compatibilidade com choices[0].message.content
+
+6.1 Proxy corporativo
+- O backend utiliza [fetchWithProxy()](server/index.js) com undici [ProxyAgent](server/index.js) para respeitar variáveis de proxy corporativo:
+  - Detecta automaticamente: HTTPS_PROXY, https_proxy, HTTP_PROXY, http_proxy
+  - Respeita NO_PROXY (bypass de proxy para hosts listados). Ex.: "localhost,127.0.0.1,::1,postgres"
+  - Loga na inicialização se o proxy está ativo e qual URL foi detectada
+- Configuração recomendada (já presente em [docker-compose.yml](docker-compose.yml)):
+  - environment:
+    - HTTP_PROXY=http://seu.proxy:8080
+    - HTTPS_PROXY=http://seu.proxy:8080
+    - NO_PROXY=localhost,127.0.0.1,::1,postgres
+  - Não adicione o domínio do Azure OpenAI em NO_PROXY para garantir que as chamadas ao Azure passem pelo proxy.
+- Execução local sem Docker (opcional):
+  - Exportar variáveis de ambiente antes de iniciar:
+    - Windows (PowerShell):
+      - $env:HTTP_PROXY="http://seu.proxy:8080"; $env:HTTPS_PROXY="http://seu.proxy:8080"; $env:NO_PROXY="localhost,127.0.0.1,::1,postgres"
+    - Linux/macOS (bash):
+      - export HTTP_PROXY="http://seu.proxy:8080" HTTPS_PROXY="http://seu.proxy:8080" NO_PROXY="localhost,127.0.0.1,::1,postgres"
+- Comportamento:
+  - Se PROXY_URL estiver definido, o dispatcher é criado via [new ProxyAgent(PROXY_URL)](server/index.js) e aplicado automaticamente nas requisições de saída para o Azure, exceto quando o host está em NO_PROXY.
 
 7. Frontend
 - O frontend foi refatorado para consumir os endpoints do app:

@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { Client } from 'pg';
+import { ProxyAgent, fetch } from 'undici';
 
 dotenv.config();
 
@@ -33,6 +34,37 @@ function assertAzureEnv() {
   }
 }
 
+// Proxy env (supports uppercase/lowercase)
+const PROXY_URL =
+  process.env.HTTPS_PROXY ||
+  process.env.https_proxy ||
+  process.env.HTTP_PROXY ||
+  process.env.http_proxy ||
+  undefined;
+
+function shouldBypassProxy(targetUrl) {
+  try {
+    const u = new URL(targetUrl);
+    const host = u.hostname.toLowerCase();
+    const list = (process.env.NO_PROXY || process.env.no_proxy || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((s) => s.replace(/^\./, '').toLowerCase());
+    return list.some((p) => p === '*' || host === p || host.endsWith(p));
+  } catch {
+    return false;
+  }
+}
+
+const dispatcher = PROXY_URL ? new ProxyAgent(PROXY_URL) : undefined;
+
+async function fetchWithProxy(url, options = {}) {
+  const useProxy = !!dispatcher && !shouldBypassProxy(url);
+  const requestOptions = useProxy ? { ...options, dispatcher } : options;
+  return fetch(url, requestOptions);
+}
+
 async function azureResponses(messages) {
   assertAzureEnv();
   const url =
@@ -42,7 +74,7 @@ async function azureResponses(messages) {
     '/responses?api-version=' +
     AZURE_OPENAI_API_VERSION;
 
-  const resp = await fetch(url, {
+  const resp = await fetchWithProxy(url, {
     method: 'POST',
     headers: {
       'api-key': AZURE_OPENAI_API_KEY,
@@ -292,6 +324,15 @@ const PORT = process.env.PORT || 3000;
     console.log('Connected to Postgres');
     app.listen(PORT, () => {
       console.log(`Server listening on port ${PORT}`);
+      if (PROXY_URL) {
+        console.log(`HTTP(S) proxy enabled: ${PROXY_URL}`);
+      } else {
+        console.log('HTTP(S) proxy disabled');
+      }
+      const noProxyEnv = process.env.NO_PROXY || process.env.no_proxy;
+      if (noProxyEnv) {
+        console.log(`NO_PROXY=${noProxyEnv}`);
+      }
     });
   } catch (err) {
     console.error('Failed to start server:', err);

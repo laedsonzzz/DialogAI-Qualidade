@@ -23,11 +23,14 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
+        # Proxy para estágio de build (npm install etc.)
+        # Não inclua domínios do Azure OpenAI em NO_PROXY para que build e runtime usem o proxy corporativo
         HTTP_PROXY: http://192.168.239.14:8080
         HTTPS_PROXY: http://192.168.239.14:8080
-        NO_PROXY: localhost,127.0.0.1,::1,.grupoaec.com.br
+        NO_PROXY: localhost,127.0.0.1,::1,postgres,.grupoaec.com.br
     container_name: dialogai_app
     environment:
+      # Proxy em runtime (aplicado pelo servidor via undici ProxyAgent)
       PORT: 3000
       HTTP_PROXY: http://192.168.239.14:8080
       HTTPS_PROXY: http://192.168.239.14:8080
