@@ -181,6 +181,11 @@ function toAzureMessagesFromChat({ systemPrompt, messages }) {
 }
 
 // Routes
+// Debug: log de todas as requisições para /api
+app.use('/api', (req, _res, next) => {
+  console.log(`[API] ${req.method} ${req.path}`);
+  next();
+});
 
 // Create conversation
 app.post('/api/conversations', async (req, res) => {
