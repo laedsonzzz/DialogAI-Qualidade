@@ -5,7 +5,7 @@ Este projeto foi migrado para uma arquitetura com backend próprio (Node/Express
 Arquitetura
 - App (Express + Vite build): [server/index.js](server/index.js)
 - Banco de dados: Postgres com volume persistente (pgdata)
-- Migrações: aplicadas automaticamente no primeiro start via [db/migrations/001_init.sql](db/migrations/001_init.sql:1)
+- Migrações: inicial automática via [db/migrations/001_init.sql](db/migrations/001_init.sql:1); migrações adicionais (ex.: [db/migrations/002_add_status_to_knowledge_base.sql](db/migrations/002_add_status_to_knowledge_base.sql:1)) devem ser aplicadas manualmente com psql dentro do container.
 - Orquestração: [docker-compose.yml](docker-compose.yml:1)
 - Frontend: Vite React consumindo API do app com base configurável (VITE_API_BASE_URL)
 
@@ -66,6 +66,10 @@ No primeiro start do Postgres, o Docker monta [db/migrations](db/migrations/001_
 - Triggers de updated_at: [public.update_row_updated_at()](db/migrations/001_init.sql:8)
 - Índices úteis para consultas
 
+4.1 Aplicar migrações adicionais (ex.: 002)
+- Com os containers em execução, aplique manualmente:
+  - docker exec -i dialogai_postgres psql -U dialogai -d dialogai -f /docker-entrypoint-initdb.d/002_add_status_to_knowledge_base.sql
+
 5. Endpoints da API (Express)
 A API do backend está implementada em [server/index.js](server/index.js:1):
 
@@ -83,12 +87,15 @@ A API do backend está implementada em [server/index.js](server/index.js:1):
     - Resposta: JSON da avaliação
 
 - Base de Conhecimento
-  - GET /api/knowledge_base
-    - Lista entradas
+  - GET /api/knowledge_base?status=active|archived|all
+    - Lista entradas; por padrão retorna apenas status=active; inclui coluna status
   - POST /api/knowledge_base
     - Body: { title, category, content }
+  - PATCH /api/knowledge_base/:id
+    - Body: { status: "archived" | "active" }
+    - Atualiza status (arquivar/reativar)
   - DELETE /api/knowledge_base/:id
-    - Remove entrada por id
+    - Remove entrada por id; se houver conversas referenciando (FK process_id), retorna 409 { code: "KB_IN_USE", referencedCount }
 
 6. Integração com Azure OpenAI
 - A chamada para Azure Responses é feita via [fetchWithProxy()](server/index.js) usando undici [ProxyAgent](server/index.js) quando HTTP(S) proxy está configurado; caso contrário, utiliza [fetch()](server/index.js). Os headers incluem ["api-key"](server/index.js).
@@ -124,7 +131,8 @@ A API do backend está implementada em [server/index.js](server/index.js:1):
     - Usa API_BASE = import.meta.env.VITE_API_BASE_URL
     - POST /api/conversations, POST /api/chat, POST /api/evaluate
   - [src/components/KnowledgeBaseManager.tsx](src/components/KnowledgeBaseManager.tsx:1)
-    - GET/POST/DELETE /api/knowledge_base
+    - GET/POST/PATCH/DELETE /api/knowledge_base
+    - Filtro de status (Ativos/Arquivados/Todos), ações de Arquivar/Reativar, e tratamento de erro 409 (processo em uso) com diálogo de arquivamento
 
 8. Remoção de Supabase
 - Removidos:
