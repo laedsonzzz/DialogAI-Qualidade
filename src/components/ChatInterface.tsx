@@ -6,6 +6,8 @@ import { ArrowLeft, Send, Loader2, Mic, MessageSquare } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useSpeechRecognition } from "@/hooks/useSpeechRecognition";
 import EvaluationResults from "./EvaluationResults";
+import { getCommonHeaders } from "@/lib/auth";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 interface Message {
   role: "user" | "assistant";
@@ -19,6 +21,19 @@ interface ChatInterfaceProps {
   onBack: () => void;
 }
 
+interface PromptVersion {
+  id: string;
+  version?: number;
+  is_active?: boolean;
+  content?: string;
+}
+
+interface Prompt {
+  id: string;
+  name?: string;
+  versions?: PromptVersion[];
+}
+
 const ChatInterface = ({ scenario, customerProfile, processId, onBack }: ChatInterfaceProps) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -29,6 +44,12 @@ const ChatInterface = ({ scenario, customerProfile, processId, onBack }: ChatInt
   const [isRecording, setIsRecording] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
   const [startY, setStartY] = useState<number | null>(null);
+
+  // Prompts por cliente e versão selecionada (multi-tenant)
+  const [prompts, setPrompts] = useState<Prompt[]>([]);
+  const [selectedPromptVersionId, setSelectedPromptVersionId] = useState<string | null>(null);
+  const [promptsLoaded, setPromptsLoaded] = useState(false);
+  const hasStartedRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
   const micButtonRef = useRef<HTMLButtonElement>(null);
@@ -38,9 +59,16 @@ const ChatInterface = ({ scenario, customerProfile, processId, onBack }: ChatInt
   const API_BASE = import.meta.env?.VITE_API_BASE_URL || "";
 
   useEffect(() => {
-    startConversation();
+    loadPrompts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!hasStartedRef.current && promptsLoaded) {
+      hasStartedRef.current = true;
+      startConversation();
+    }
+  }, [promptsLoaded]);
 
   useEffect(() => {
     scrollToBottom();
@@ -157,10 +185,21 @@ const ChatInterface = ({ scenario, customerProfile, processId, onBack }: ChatInt
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
+  async function apiGet<T>(path: string): Promise<T> {
+    const res = await fetch(`${API_BASE}${path}`, {
+      headers: getCommonHeaders(),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text || `Erro HTTP ${res.status}`);
+    }
+    return res.json();
+  }
+
   async function apiPost<T>(path: string, body: any): Promise<T> {
     const res = await fetch(`${API_BASE}${path}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getCommonHeaders(),
       body: JSON.stringify(body),
     });
     if (!res.ok) {
@@ -178,6 +217,7 @@ const ChatInterface = ({ scenario, customerProfile, processId, onBack }: ChatInt
         scenario,
         customerProfile,
         processId: processId || null,
+        promptVersionId: selectedPromptVersionId || null,
       });
       setConversationId(conv.id);
 
@@ -194,9 +234,27 @@ const ChatInterface = ({ scenario, customerProfile, processId, onBack }: ChatInt
       setMessages([aiMessage]);
     } catch (error: any) {
       console.error("Error starting conversation:", error);
+      let msg = error?.message || "";
+      let missing = "";
+      try {
+        const parsed = JSON.parse(msg);
+        if (parsed && typeof parsed === "object") {
+          msg = parsed.error || msg;
+          missing = parsed.missing_permission || "";
+        }
+      } catch {}
+      if (missing === "can_start_chat" || /Acesso negado/i.test(msg)) {
+        toast({
+          title: "Sem permissão",
+          description: "Você não possui permissão para iniciar conversas neste cliente.",
+          variant: "destructive",
+        });
+        onBack();
+        return;
+      }
       toast({
         title: "Erro",
-        description: error.message || "Não foi possível iniciar a conversa",
+        description: msg || "Não foi possível iniciar a conversa",
         variant: "destructive",
       });
     } finally {
@@ -204,7 +262,49 @@ const ChatInterface = ({ scenario, customerProfile, processId, onBack }: ChatInt
     }
   };
 
+  async function loadPrompts() {
+    try {
+      // Lista prompts e versões do cliente atual
+      const list = await apiGet<any>("/api/prompts?include=all");
+      // Normaliza em {id,name,versions[]}
+      const normalized: Prompt[] = Array.isArray(list)
+        ? list.map((p: any) => ({
+            id: p.id,
+            name: p.name || p.title || "Prompt",
+            versions: Array.isArray(p.versions)
+              ? p.versions.map((v: any) => ({
+                  id: v.id,
+                  version: v.version,
+                  is_active: v.is_active || v.active || false,
+                  content: v.content,
+                }))
+              : [],
+          }))
+        : [];
+      setPrompts(normalized);
+
+      // Seleciona por padrão a versão ativa do primeiro prompt, se existir
+      const firstActive = normalized.flatMap((p) => p.versions || []).find((v) => v.is_active);
+      if (firstActive?.id) {
+        setSelectedPromptVersionId(firstActive.id);
+      }
+    } catch (error) {
+      // Silencia erro (prompts são opcionais)
+      console.warn("Erro ao carregar prompts:", error);
+    } finally {
+      setPromptsLoaded(true);
+    }
+  }
+
   const sendMessage = async () => {
+    if (!conversationId) {
+      toast({
+        title: "Conversa não iniciada",
+        description: "Não foi possível iniciar a conversa. Volte e tente novamente.",
+        variant: "destructive",
+      });
+      return;
+    }
     if (!input.trim() || isLoading) return;
 
     const userMessage: Message = { role: "user", content: input };
@@ -304,6 +404,31 @@ const ChatInterface = ({ scenario, customerProfile, processId, onBack }: ChatInt
                 <span className="w-2 h-2 rounded-full bg-secondary animate-pulse" />
                 Perfil: {customerProfile}
               </p>
+
+              {/* Seleção de Prompt/Versão por cliente */}
+              {prompts.length > 0 && (
+                <div className="mt-2">
+                  <div className="text-xs text-muted-foreground mb-1">Prompt da simulação</div>
+                  <Select
+                    value={selectedPromptVersionId || undefined}
+                    onValueChange={(v) => setSelectedPromptVersionId(v)}
+                  >
+                    <SelectTrigger className="w-[280px]">
+                      <SelectValue placeholder="Selecione o prompt/versão" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {prompts.flatMap((p) =>
+                        (p.versions || []).map((v) => (
+                          <SelectItem key={v.id} value={v.id}>
+                            {p.name} {typeof v.version === "number" ? `v${v.version}` : ""}{" "}
+                            {v.is_active ? "(ativo)" : ""}
+                          </SelectItem>
+                        ))
+                      )}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -389,7 +514,7 @@ const ChatInterface = ({ scenario, customerProfile, processId, onBack }: ChatInt
                   onTouchStart={handleTouchStart}
                   onTouchEnd={handleTouchEnd}
                   onTouchMove={handleTouchMove}
-                  disabled={isLoading}
+                  disabled={isLoading || !conversationId}
                   variant={isRecording ? "destructive" : "outline"}
                   className={`touch-none select-none transition-all ${isRecording ? "scale-110 animate-pulse shadow-lg" : ""}`}
                   size="icon"
@@ -402,13 +527,19 @@ const ChatInterface = ({ scenario, customerProfile, processId, onBack }: ChatInt
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyPress={(e) => e.key === "Enter" && !isRecording && sendMessage()}
-              placeholder={isRecording ? "Gravando áudio..." : "Digite ou segure o microfone para falar..."}
-              disabled={isLoading || isRecording}
+              placeholder={
+                !conversationId
+                  ? "Aguardando início da conversa..."
+                  : isRecording
+                  ? "Gravando áudio..."
+                  : "Digite ou segure o microfone para falar..."
+              }
+              disabled={isLoading || isRecording || !conversationId}
               className="flex-1"
             />
             <Button
               onClick={sendMessage}
-              disabled={isLoading || !input.trim() || isRecording}
+              disabled={isLoading || !input.trim() || isRecording || !conversationId}
               className="bg-gradient-primary text-white hover:opacity-90 shadow-glow"
               size="icon"
             >

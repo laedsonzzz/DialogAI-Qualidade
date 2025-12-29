@@ -7,10 +7,17 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import ChatInterface from "@/components/ChatInterface";
 import { KnowledgeBaseManager } from "@/components/KnowledgeBaseManager";
+import ConversationsList from "@/components/ConversationsList";
+import AdminPanel from "@/components/AdminPanel";
 import heroImage from "@/assets/hero-customer-service.jpg";
 import aiChatIllustration from "@/assets/ai-chat-illustration.jpg";
 import analyticsIllustration from "@/assets/analytics-illustration.jpg";
 import knowledgeIllustration from "@/assets/knowledge-illustration.jpg";
+import ClientSwitcher from "@/components/ClientSwitcher";
+import ProfileMenu from "@/components/ProfileMenu";
+import { useNavigate } from "react-router-dom";
+import { getAuthHeader, clearTokens, getClientId } from "@/lib/auth";
+import { getCommonHeaders } from "@/lib/auth";
 
 interface KnowledgeEntry {
   id: string;
@@ -68,16 +75,122 @@ const Index = () => {
   const [showChat, setShowChat] = useState(false);
   const [processes, setProcesses] = useState<KnowledgeEntry[]>([]);
   const [activeTab, setActiveTab] = useState<string>("simulate");
+  const [canStartChat, setCanStartChat] = useState<boolean>(false);
+  const [isAdmin, setIsAdmin] = useState<boolean>(false);
+  const [hasAdmin, setHasAdmin] = useState<boolean>(true);
 
   const API_BASE = import.meta.env?.VITE_API_BASE_URL || "";
+  const navigate = useNavigate();
+
+  // Carrega permissões do usuário para o cliente selecionado (can_start_chat)
+  const loadPermissions = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/me`, {
+        headers: {
+          ...getAuthHeader(),
+          "Content-Type": "application/json",
+        },
+      });
+      if (!res.ok) {
+        setCanStartChat(false);
+        return;
+      }
+      const data = await res.json();
+      const cid = getClientId();
+      const found = (data.clients || []).find((c: any) => c.client_id === cid);
+      setCanStartChat(Boolean(found?.permissions?.can_start_chat));
+      setIsAdmin(Boolean(data?.user?.is_admin));
+    } catch {
+      setCanStartChat(false);
+    }
+  };
+
+  useEffect(() => {
+    loadPermissions();
+    loadAdminStatus();
+  }, []);
+
+  async function loadAdminStatus() {
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/admin_status`);
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error((data as any)?.error || `Erro HTTP ${res.status}`);
+      }
+      setHasAdmin(Boolean(data?.has_admin));
+    } catch {
+      // Se falhar, mantém como true para não exibir ação por engano
+      setHasAdmin(true);
+    }
+  }
+
+  async function elevateIfNoAdmin() {
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/elevate_if_no_admin`, {
+        method: "POST",
+        headers: {
+          ...getAuthHeader(),
+          "Content-Type": "application/json",
+        },
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error((data as any)?.error || `Erro HTTP ${res.status}`);
+      }
+      // Elevado com sucesso
+      setIsAdmin(true);
+      setHasAdmin(true);
+      // Recarregar permissões/UI
+      await loadPermissions();
+      setActiveTab("admin");
+    } catch (e: any) {
+      console.error("Erro ao elevar administrador:", e);
+      // silencia, botão fica apenas desabilitado quando já existe admin
+    }
+  }
+
+  const handleLogout = async () => {
+    try {
+      await fetch(`${API_BASE}/api/auth/logout`, {
+        method: "POST",
+        headers: {
+          ...getAuthHeader(),
+          "Content-Type": "application/json",
+        },
+      });
+    } catch {
+      // ignore network errors
+    } finally {
+      clearTokens();
+      navigate("/login", { replace: true });
+    }
+  };
 
   useEffect(() => {
     loadProcesses();
   }, []);
-
+  
+  useEffect(() => {
+    const handler = () => {
+      loadPermissions();
+      loadAdminStatus();
+      loadProcesses();
+      setShowChat(false);
+      setSelectedScenario(null);
+      setSelectedProfile(null);
+      setSelectedProcess("");
+    };
+    window.addEventListener("client:changed", handler as any);
+    return () => {
+      window.removeEventListener("client:changed", handler as any);
+    };
+  }, []);
+  
   const loadProcesses = async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/knowledge_base`);
+      const res = await fetch(`${API_BASE}/api/knowledge_base`, {
+        headers: getCommonHeaders(),
+      });
       if (!res.ok) {
         const text = await res.text();
         throw new Error(text || `Erro HTTP ${res.status}`);
@@ -91,6 +204,7 @@ const Index = () => {
   };
 
   const handleStartTraining = () => {
+    if (!canStartChat) return;
     if (selectedScenario && selectedProfile) {
       setShowChat(true);
     }
@@ -121,6 +235,28 @@ const Index = () => {
   return (
     <div className="min-h-screen bg-gradient-to-br from-background via-background to-muted">
       <div className="container mx-auto px-4 py-8">
+        <div className="mb-6">
+          <div className="flex items-center gap-4">
+            <ClientSwitcher />
+            {!isAdmin && !hasAdmin && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={elevateIfNoAdmin}
+                title="Promover sua conta a administrador (nenhum admin existe)"
+              >
+                Tornar-se Administrador
+              </Button>
+            )}
+            <div className="ml-auto flex items-center gap-3">
+              <ProfileMenu />
+              <Button variant="outline" size="sm" onClick={handleLogout}>
+                Sair
+              </Button>
+            </div>
+          </div>
+        </div>
         {/* Hero Section with Image */}
         <div className="relative mb-16 rounded-3xl overflow-hidden shadow-glow">
           <div 
@@ -142,9 +278,10 @@ const Index = () => {
                 Treine suas habilidades de atendimento com simulações realistas baseadas em IA e processos reais
               </p>
               <div className="flex flex-wrap gap-4">
-                <Button 
-                  size="lg" 
+                <Button
+                  size="lg"
                   className="bg-secondary hover:bg-secondary/90 text-white shadow-lg"
+                  disabled={!canStartChat}
                   onClick={() => {
                     setActiveTab("simulate");
                     setTimeout(() => {
@@ -171,21 +308,37 @@ const Index = () => {
 
         {/* Tabs for Simulation and Knowledge Base */}
         <Tabs value={activeTab} onValueChange={setActiveTab} className="max-w-6xl mx-auto">
-          <TabsList className="grid w-full grid-cols-2 mb-8 bg-card/50 backdrop-blur-sm p-1">
-            <TabsTrigger 
-              value="simulate" 
+          <TabsList className={`grid w-full ${isAdmin ? 'grid-cols-4' : 'grid-cols-3'} mb-8 bg-card/50 backdrop-blur-sm p-1`}>
+            <TabsTrigger
+              value="simulate"
               className="flex items-center gap-2"
             >
               <MessageSquare className="w-4 h-4" />
               Iniciar Simulação
             </TabsTrigger>
-            <TabsTrigger 
-              value="knowledge" 
+            <TabsTrigger
+              value="knowledge"
               className="flex items-center gap-2"
             >
               <BookOpen className="w-4 h-4" />
               Base de Conhecimento
             </TabsTrigger>
+            <TabsTrigger
+              value="conversations"
+              className="flex items-center gap-2"
+            >
+              <MessageSquare className="w-4 h-4" />
+              Conversas
+            </TabsTrigger>
+            {isAdmin && (
+              <TabsTrigger
+                value="admin"
+                className="flex items-center gap-2"
+              >
+                <MessageSquare className="w-4 h-4" />
+                Admin
+              </TabsTrigger>
+            )}
           </TabsList>
 
           <TabsContent value="knowledge">
@@ -492,6 +645,7 @@ const Index = () => {
                   <Button
                     size="lg"
                     className="bg-gradient-primary text-white hover:opacity-90 shadow-glow text-lg px-8"
+                    disabled={!canStartChat}
                     onClick={handleStartTraining}
                   >
                     Iniciar Simulação
@@ -511,6 +665,17 @@ const Index = () => {
               </div>
             </div>
           </TabsContent>
+
+          <TabsContent value="conversations">
+            <ConversationsList />
+          </TabsContent>
+
+          {isAdmin && (
+            <TabsContent value="admin">
+              <AdminPanel />
+            </TabsContent>
+          )}
+
         </Tabs>
       </div>
     </div>

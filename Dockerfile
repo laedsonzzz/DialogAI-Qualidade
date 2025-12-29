@@ -27,6 +27,9 @@ RUN npm run build
 FROM base AS runtime
 WORKDIR /app
 
+# Instala libvips para processamento de imagens (sharp)
+RUN apt-get update && apt-get install -y --no-install-recommends libvips && rm -rf /var/lib/apt/lists/*
+
 # 3. Copia apenas o package.json aqui também
 COPY package.json ./
 # 4. Usa 'install' em vez de 'ci' para garantir compatibilidade e ignorar lockfile antigo

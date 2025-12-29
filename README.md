@@ -35,6 +35,11 @@ Crie o arquivo .env na raiz a partir de [.env.example](.env.example:1):
 
 - App server
   - PORT=3000
+- Autenticação (JWT)
+  - JWT_SECRET=chave secreta para assinar tokens (defina valor forte em produção)
+  - PASSWORD_MIN_LENGTH=8
+- Cabeçalhos de contexto (obrigatórios nas rotas de dados autenticadas)
+  - X-Client-Id=UUID do cliente ao qual a operação se refere
 
 Segurança
 - [.gitignore](.gitignore:25) já ignora .env
@@ -66,36 +71,62 @@ No primeiro start do Postgres, o Docker monta [db/migrations](db/migrations/001_
 - Triggers de updated_at: [public.update_row_updated_at()](db/migrations/001_init.sql:8)
 - Índices úteis para consultas
 
-4.1 Aplicar migrações adicionais (ex.: 002)
+4.1 Aplicar migrações adicionais (ex.: 002, 003, 004)
 - Com os containers em execução, aplique manualmente:
   - docker exec -i dialogai_postgres psql -U dialogai -d dialogai -f /docker-entrypoint-initdb.d/002_add_status_to_knowledge_base.sql
+  - docker exec -i dialogai_postgres psql -U dialogai -d dialogai -f /docker-entrypoint-initdb.d/003_auth_multi_tenant.sql
+  - docker exec -i dialogai_postgres psql -U dialogai -d dialogai -f /docker-entrypoint-initdb.d/004_scope_existing_entities.sql
 
 5. Endpoints da API (Express)
-A API do backend está implementada em [server/index.js](server/index.js:1):
+A API do backend está implementada em [server/index.js](server/index.js:1) e as rotas de autenticação em [server/routes/auth.js](server/routes/auth.js:1).
 
-- Conversas
+- Autenticação
+  - POST /api/auth/login
+    - Body:
+      - Primeiro acesso: { email, new_password, confirm_password }
+      - Acesso normal: { email, password }
+    - Respostas:
+      - { require_set_password: true } quando o usuário ainda não definiu senha
+      - { access_token, user, require_set_password: false } quando autenticado
+  - POST /api/auth/logout
+    - Registra histórico de logout (login_history)
+  - GET /api/auth/me
+    - Retorna { user, clients: [{ client_id, client_name, client_code, tipo_usuario, permissions: { can_start_chat, can_edit_kb, can_view_team_chats, can_view_all_client_chats } }] }
+
+- Cabeçalhos e contexto (obrigatório nas rotas protegidas)
+  - Authorization: Bearer <access_token>
+  - X-Client-Id: UUID do cliente (multi-tenant). A associação do usuário ao cliente é validada via RBAC.
+  - Middlewares: requireAuth + requireTenant (+ permissions) em [server/index.js](server/index.js:283)
+
+- Conversas (protegido; requer RBAC por cliente)
   - POST /api/conversations
+    - Permissão: can_start_chat
     - Body: { scenario, customerProfile, processId? }
+    - Efeitos: cria com client_id=req.clientId e user_id=req.user.id
     - Resposta: { id }
   - POST /api/chat
     - Body: { messages: Message[], scenario, customerProfile, processId?, conversationId? }
-    - Integra Azure Responses API para gerar a resposta; se conversationId for informado, persiste transcript
+    - Integra Azure Responses API para gerar resposta; se conversationId for informado, persiste transcript (escopo por client_id)
     - Resposta: { message: string }
   - POST /api/evaluate
     - Body: { transcript: Message[], scenario, customerProfile, conversationId? }
-    - Integra Azure Responses API para avaliação (JSON); se conversationId for informado, atualiza ended_at, csat_score, feedback
+    - Integra Azure Responses API para avaliação (JSON); se conversationId for informado, atualiza ended_at, csat_score, feedback (escopo por client_id)
     - Resposta: JSON da avaliação
 
-- Base de Conhecimento
+- Base de Conhecimento (protegido; requer RBAC por cliente)
   - GET /api/knowledge_base?status=active|archived|all
-    - Lista entradas; por padrão retorna apenas status=active; inclui coluna status
+    - Filtra por client_id automaticamente (X-Client-Id)
   - POST /api/knowledge_base
+    - Permissão: can_edit_kb
     - Body: { title, category, content }
+    - Cria registro com client_id=req.clientId
   - PATCH /api/knowledge_base/:id
+    - Permissão: can_edit_kb
     - Body: { status: "archived" | "active" }
-    - Atualiza status (arquivar/reativar)
+    - Atualiza status no escopo do cliente
   - DELETE /api/knowledge_base/:id
-    - Remove entrada por id; se houver conversas referenciando (FK process_id), retorna 409 { code: "KB_IN_USE", referencedCount }
+    - Permissão: can_edit_kb
+    - Remove entrada por id no escopo do cliente; se houver conversas referenciando (FK process_id e mesmo client_id), retorna 409 { code: "KB_IN_USE", referencedCount }
 
 6. Integração com Azure OpenAI
 - A chamada para Azure Responses é feita via [fetchWithProxy()](server/index.js) usando undici [ProxyAgent](server/index.js) quando HTTP(S) proxy está configurado; caso contrário, utiliza [fetch()](server/index.js). Os headers incluem ["api-key"](server/index.js).
@@ -159,7 +190,7 @@ A API do backend está implementada em [server/index.js](server/index.js:1):
 - Azure OpenAI erro 429/402:
   - Limite de requisições/créditos insuficientes; revise a chave/planos
 - CORS:
-  - O app habilita CORS com headers padrão (authorization, x-client-info, apikey, content-type)
+  - O app habilita CORS com headers padrão (authorization, x-client-info, apikey, content-type, x-client-id)
 
 12. Licença
 - Uso interno para simulações de atendimento e avaliação de qualidade.

@@ -5,6 +5,15 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { Client } from 'pg';
 import { ProxyAgent, fetch } from 'undici';
+import { authRoutes } from './routes/auth.js';
+import { requireAuth } from './middleware/auth.js';
+import { requireTenant } from './middleware/tenant.js';
+import { requireCanEditKB, requireCanStartChat } from './middleware/permissions.js';
+import { writeAudit } from './middleware/audit.js';
+import { promptsRoutes } from './routes/prompts.js';
+import { importsRoutes } from './routes/imports.js';
+import { adminRoutes } from './routes/admin.js';
+import { profileRoutes } from './routes/profile.js';
 
 dotenv.config();
 
@@ -12,7 +21,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-app.use(cors({ origin: '*', allowedHeaders: ['authorization', 'x-client-info', 'apikey', 'content-type'] }));
+app.use(cors({ origin: '*', allowedHeaders: ['authorization', 'x-client-info', 'apikey', 'content-type', 'x-client-id'] }));
 app.use(express.json({ limit: '2mb' }));
 
 // Postgres connection
@@ -21,6 +30,9 @@ const DATABASE_URL =
   `postgres://${process.env.POSTGRES_USER || 'dialogai'}:${process.env.POSTGRES_PASSWORD || 'dialogai_secret'}@${process.env.POSTGRES_HOST || 'postgres'}:${process.env.POSTGRES_PORT || '5432'}/${process.env.POSTGRES_DB || 'dialogai'}`;
 
 const pgClient = new Client({ connectionString: DATABASE_URL });
+app.use('/api/auth', authRoutes(pgClient));
+app.use('/api/admin', requireAuth(pgClient), adminRoutes(pgClient));
+app.use('/api/profile', requireAuth(pgClient), profileRoutes(pgClient));
 
 // Azure OpenAI env
 const AZURE_OPENAI_ENDPOINT = process.env.AZURE_OPENAI_ENDPOINT_1;
@@ -275,6 +287,14 @@ app.use('/api', (req, _res, next) => {
   next();
 });
 
+// Proteção por autenticação e tenant por prefixo
+app.use('/api/knowledge_base', requireAuth(pgClient), requireTenant(pgClient));
+app.use('/api/conversations', requireAuth(pgClient), requireTenant(pgClient));
+app.use('/api/chat', requireAuth(pgClient), requireTenant(pgClient));
+app.use('/api/evaluate', requireAuth(pgClient), requireTenant(pgClient));
+app.use('/api/prompts', requireAuth(pgClient), requireTenant(pgClient), promptsRoutes(pgClient));
+app.use('/api/imports', requireAuth(pgClient), requireTenant(pgClient), requireCanEditKB(), importsRoutes(pgClient));
+
 // Azure debug endpoints
 app.get('/api/azure/deployments', async (_req, res) => {
   try {
@@ -295,16 +315,140 @@ app.get('/api/azure/deployments', async (_req, res) => {
   }
 });
 
-// Create conversation
-app.post('/api/conversations', async (req, res) => {
+// Conversations listing with RBAC scopes (team|client)
+app.get('/api/conversations', async (req, res) => {
   try {
-    const { scenario, customerProfile, processId } = req.body;
-    const result = await pgClient.query(
-      `INSERT INTO public.conversations (scenario, customer_profile, transcript, process_id, started_at)
-       VALUES ($1, $2, '[]'::jsonb, $3, now()) RETURNING id`,
-      [scenario, customerProfile, processId || null]
+    const scope = String((req.query?.scope ?? 'team')).toLowerCase();
+    const clientId = req.clientId;
+
+    // Helper to select own conversations (fallback)
+    async function listOwn() {
+      const r = await pgClient.query(
+        `SELECT id, scenario, customer_profile, process_id, started_at, ended_at, csat_score, user_id
+           FROM public.conversations
+          WHERE client_id = $1 AND user_id = $2 AND deleted_at IS NULL
+          ORDER BY started_at DESC`,
+        [clientId, req.user.id]
+      );
+      return r.rows;
+    }
+
+    if (scope === 'client') {
+      if (!req.userPerms?.can_view_all_client_chats) {
+        return res.status(403).json({ error: 'Acesso negado', missing_permission: 'can_view_all_client_chats' });
+      }
+      const r = await pgClient.query(
+        `SELECT id, scenario, customer_profile, process_id, started_at, ended_at, csat_score, user_id
+           FROM public.conversations
+          WHERE client_id = $1 AND deleted_at IS NULL
+          ORDER BY started_at DESC`,
+        [clientId]
+      );
+      return res.json(r.rows);
+    }
+
+    // Default: team scope
+    if (!req.userPerms?.can_view_team_chats) {
+      // Sem permissão de equipe, retorna apenas as próprias
+      const own = await listOwn();
+      return res.json(own);
+    }
+
+    const supMat = req.userEmployee?.matricula || null;
+    if (!supMat) {
+      const own = await listOwn();
+      return res.json(own);
+    }
+
+    const teamUsers = await pgClient.query(
+      `WITH team AS (
+          SELECT e.matricula
+            FROM public.employees e
+           WHERE e.client_id = $1 AND e.matricula_supervisor = $2
+          UNION ALL
+          SELECT $2::text
+       )
+       SELECT DISTINCT uel.user_id
+         FROM public.user_employee_links uel
+         JOIN team t ON t.matricula = uel.matricula
+        WHERE uel.client_id = $1`,
+      [clientId, supMat]
     );
-    return res.json({ id: result.rows[0].id });
+    const ids = (teamUsers.rows || []).map((r) => r.user_id);
+    if (ids.length === 0) {
+      return res.json([]);
+    }
+
+    const convs = await pgClient.query(
+      `SELECT id, scenario, customer_profile, process_id, started_at, ended_at, csat_score, user_id
+         FROM public.conversations
+        WHERE client_id = $1 AND user_id = ANY($2::uuid[]) AND deleted_at IS NULL
+        ORDER BY started_at DESC`,
+      [clientId, ids]
+    );
+    return res.json(convs.rows);
+  } catch (err) {
+    console.error('List conversations error:', err);
+    return res.status(500).json({ error: 'Erro ao listar conversas' });
+  }
+});
+
+// Create conversation (with optional prompt_version_id)
+app.post('/api/conversations', requireCanStartChat(), async (req, res) => {
+  try {
+    const { scenario, customerProfile, processId, promptVersionId, prompt_version_id } = req.body;
+    const pvId = promptVersionId || prompt_version_id || null;
+
+    // Validar processo dentro do cliente (se informado)
+    if (processId) {
+      const chk = await pgClient.query(
+        'SELECT 1 FROM public.knowledge_base WHERE id = $1 AND client_id = $2',
+        [processId, req.clientId]
+      );
+      if (chk.rows.length === 0) {
+        return res.status(404).json({ error: 'Processo não encontrado neste cliente' });
+      }
+    }
+
+    // Validar prompt_version pertencente ao cliente (se informado)
+    if (pvId) {
+      const chkPv = await pgClient.query(
+        `SELECT pv.id
+           FROM public.prompt_versions pv
+           JOIN public.prompts p ON p.id = pv.prompt_id
+          WHERE pv.id = $1 AND p.client_id = $2`,
+        [pvId, req.clientId]
+      );
+      if (chkPv.rows.length === 0) {
+        return res.status(404).json({ error: 'Versão de prompt não encontrada neste cliente' });
+      }
+    }
+
+    const result = await pgClient.query(
+      `INSERT INTO public.conversations (scenario, customer_profile, transcript, process_id, started_at, client_id, user_id, prompt_version_id)
+       VALUES ($1, $2, '[]'::jsonb, $3, now(), $4, $5, $6) RETURNING id`,
+      [scenario, customerProfile, processId || null, req.clientId, req.user.id, pvId]
+    );
+
+    const conversationId = result.rows[0].id;
+
+    // Auditoria: criação de conversa
+    await writeAudit(pgClient, req, {
+      entityType: 'conversations',
+      entityId: conversationId,
+      action: 'create',
+      before: null,
+      after: {
+        scenario,
+        customer_profile: customerProfile,
+        process_id: processId || null,
+        prompt_version_id: pvId || null,
+        client_id: req.clientId,
+        user_id: req.user.id,
+      },
+    });
+
+    return res.json({ id: conversationId });
   } catch (err) {
     console.error('Create conversation error:', err);
     return res.status(500).json({ error: 'Erro ao iniciar conversa' });
@@ -318,9 +462,14 @@ app.post('/api/chat', async (req, res) => {
 
     let processContent = '';
     if (processId) {
-      const pr = await pgClient.query('SELECT content FROM public.knowledge_base WHERE id = $1', [processId]);
+      const pr = await pgClient.query(
+        'SELECT content FROM public.knowledge_base WHERE id = $1 AND client_id = $2',
+        [processId, req.clientId]
+      );
       if (pr.rows.length > 0) {
         processContent = pr.rows[0].content;
+      } else {
+        return res.status(404).json({ error: 'Processo não encontrado neste cliente' });
       }
     }
 
@@ -328,13 +477,42 @@ app.post('/api/chat', async (req, res) => {
     const azureMessages = toAzureMessagesFromChat({ systemPrompt, messages });
     const aiMessageText = await azureResponses(azureMessages);
 
-    // persist transcript if conversationId provided
+    // persist transcript and per-message rows if conversationId provided
     if (conversationId) {
       const finalMessages = [...(messages || []), { role: 'assistant', content: aiMessageText }];
-      await pgClient.query('UPDATE public.conversations SET transcript = $2::jsonb WHERE id = $1', [
-        conversationId,
-        JSON.stringify(finalMessages),
-      ]);
+      const upd = await pgClient.query(
+        'UPDATE public.conversations SET transcript = $2::jsonb WHERE id = $1 AND client_id = $3',
+        [conversationId, JSON.stringify(finalMessages), req.clientId]
+      );
+      if (upd.rowCount === 0) {
+        return res.status(404).json({ error: 'Conversa não encontrada neste cliente' });
+      }
+
+      // Persist per-message entries
+      try {
+        // Insert last user message for this turn, if any
+        if (Array.isArray(messages) && messages.length > 0) {
+          for (let i = messages.length - 1; i >= 0; i--) {
+            const m = messages[i];
+            if (m && m.role === 'user' && typeof m.content === 'string' && m.content.length > 0) {
+              await pgClient.query(
+                'INSERT INTO public.conversation_messages (conversation_id, role, content) VALUES ($1, $2, $3)',
+                [conversationId, 'user', m.content]
+              );
+              break;
+            }
+          }
+        }
+        // Insert assistant reply
+        if (typeof aiMessageText === 'string' && aiMessageText.length > 0) {
+          await pgClient.query(
+            'INSERT INTO public.conversation_messages (conversation_id, role, content) VALUES ($1, $2, $3)',
+            [conversationId, 'assistant', aiMessageText]
+          );
+        }
+      } catch (e) {
+        console.warn('Failed to persist conversation_messages; proceeding with transcript only:', e);
+      }
     }
 
     return res.json({ message: aiMessageText });
@@ -361,14 +539,17 @@ app.post('/api/evaluate', async (req, res) => {
 
     // persist evaluation if conversationId
     if (conversationId) {
-      await pgClient.query(
+      const upd = await pgClient.query(
         `UPDATE public.conversations
          SET ended_at = now(),
              csat_score = $2,
              feedback = $3::jsonb
-         WHERE id = $1`,
-        [conversationId, evaluation.csat || null, JSON.stringify(evaluation)]
+         WHERE id = $1 AND client_id = $4`,
+        [conversationId, evaluation.csat || null, JSON.stringify(evaluation), req.clientId]
       );
+      if (upd.rowCount === 0) {
+        return res.status(404).json({ error: 'Conversa não encontrado neste cliente' });
+      }
     }
 
     return res.json(evaluation);
@@ -385,15 +566,112 @@ app.post('/api/evaluate', async (req, res) => {
   }
 });
 
+// Conversations meta and messages viewer routes
+app.get('/api/conversations/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const r = await pgClient.query(
+      `SELECT id, scenario, customer_profile, process_id, started_at, ended_at, csat_score, user_id
+         FROM public.conversations
+        WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL`,
+      [id, req.clientId]
+    );
+    if (r.rows.length === 0) {
+      return res.status(404).json({ error: 'Conversa não encontrada neste cliente' });
+    }
+    return res.json(r.rows[0]);
+  } catch (err) {
+    console.error('Get conversation meta error:', err);
+    return res.status(500).json({ error: 'Erro ao carregar conversa' });
+  }
+});
+
+app.get('/api/conversations/:id/messages', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const conv = await pgClient.query(
+      `SELECT id, ended_at
+         FROM public.conversations
+        WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL`,
+      [id, req.clientId]
+    );
+    if (conv.rows.length === 0) {
+      return res.status(404).json({ error: 'Conversa não encontrada neste cliente' });
+    }
+    const c = conv.rows[0];
+    if (!c.ended_at) {
+      return res.status(403).json({ error: 'Acesso negado: conversa não finalizada', code: 'CONVERSATION_NOT_FINISHED' });
+    }
+
+    const msgs = await pgClient.query(
+      `SELECT id, role, content, created_at, seq
+         FROM public.conversation_messages
+        WHERE conversation_id = $1
+        ORDER BY created_at ASC, COALESCE(seq, 0) ASC`,
+      [id]
+    );
+    return res.json(msgs.rows);
+  } catch (err) {
+    console.error('Get conversation messages error:', err);
+    return res.status(500).json({ error: 'Erro ao carregar mensagens da conversa' });
+  }
+});
+
+// Soft delete conversation (admin only)
+app.delete('/api/conversations/:id', async (req, res) => {
+  try {
+    if (!req.user?.is_admin) {
+      return res.status(403).json({ error: 'Acesso negado', code: 'ADMIN_ONLY' });
+    }
+    const { id } = req.params;
+
+    // Load previous state for audit
+    const prev = await pgClient.query(
+      `SELECT id, scenario, customer_profile, process_id, started_at, ended_at, csat_score, client_id, user_id
+         FROM public.conversations
+        WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL`,
+      [id, req.clientId]
+    );
+    if (prev.rows.length === 0) {
+      return res.status(404).json({ error: 'Conversa não encontrada neste cliente' });
+    }
+    const before = prev.rows[0];
+    const reason = req.body && typeof req.body.reason === 'string' ? req.body.reason.slice(0, 500) : null;
+
+    const upd = await pgClient.query(
+      'UPDATE public.conversations SET deleted_at = now() WHERE id = $1 AND client_id = $2',
+      [id, req.clientId]
+    );
+    if (upd.rowCount === 0) {
+      return res.status(404).json({ error: 'Conversa não encontrada neste cliente' });
+    }
+
+    await writeAudit(pgClient, req, {
+      entityType: 'conversations',
+      entityId: id,
+      action: 'soft_delete',
+      before,
+      after: { deleted_at: new Date().toISOString(), reason },
+    });
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('Soft delete conversation error:', err);
+    return res.status(500).json({ error: 'Erro ao excluir conversa' });
+  }
+});
+
 // Knowledge base CRUD
 app.get('/api/knowledge_base', async (req, res) => {
   try {
+    const clientId = req.clientId;
     const statusParam = String((req.query?.status ?? 'active')).toLowerCase();
-    let sql = 'SELECT id, title, category, content, status, created_at, updated_at FROM public.knowledge_base';
-    let params = [];
+
+    let sql = 'SELECT id, title, category, content, status, created_at, updated_at FROM public.knowledge_base WHERE client_id = $1';
+    const params = [clientId];
     if (statusParam === 'active' || statusParam === 'archived') {
-      sql += ' WHERE status = $1 ORDER BY created_at DESC';
-      params = [statusParam];
+      sql += ' AND status = $2 ORDER BY created_at DESC';
+      params.push(statusParam);
     } else {
       sql += ' ORDER BY created_at DESC';
     }
@@ -405,14 +683,27 @@ app.get('/api/knowledge_base', async (req, res) => {
   }
 });
 
-app.post('/api/knowledge_base', async (req, res) => {
+app.post('/api/knowledge_base', requireCanEditKB(), async (req, res) => {
   try {
     const { title, category, content } = req.body;
-    await pgClient.query(
-      `INSERT INTO public.knowledge_base (title, category, content) VALUES ($1, $2, $3)`,
-      [title, category, content]
+    const r = await pgClient.query(
+      `INSERT INTO public.knowledge_base (title, category, content, client_id)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, status, created_at, updated_at`,
+      [title, category, content, req.clientId]
     );
-    return res.json({ ok: true });
+    const kb = r.rows[0];
+
+    // Auditoria: criação de KB
+    await writeAudit(pgClient, req, {
+      entityType: 'knowledge_base',
+      entityId: kb.id,
+      action: 'create',
+      before: null,
+      after: { id: kb.id, title, category, status: kb.status, client_id: req.clientId },
+    });
+
+    return res.json({ ok: true, id: kb.id });
   } catch (err) {
     console.error('KB insert error:', err);
     return res.status(500).json({ error: 'Erro ao salvar processo' });
@@ -422,7 +713,7 @@ app.post('/api/knowledge_base', async (req, res) => {
 /**
  * Atualiza o status (active|archived) de um processo da base de conhecimento
  */
-app.patch('/api/knowledge_base/:id', async (req, res) => {
+app.patch('/api/knowledge_base/:id', requireCanEditKB(), async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body || {};
@@ -430,7 +721,34 @@ app.patch('/api/knowledge_base/:id', async (req, res) => {
     if (normalized !== 'active' && normalized !== 'archived') {
       return res.status(400).json({ error: 'Status inválido', code: 'INVALID_STATUS', allowed: ['active', 'archived'] });
     }
-    await pgClient.query('UPDATE public.knowledge_base SET status = $2 WHERE id = $1', [id, normalized]);
+
+    // Buscar estado anterior para auditoria
+    const prev = await pgClient.query(
+      'SELECT id, title, category, content, status FROM public.knowledge_base WHERE id = $1 AND client_id = $2',
+      [id, req.clientId]
+    );
+    if (prev.rows.length === 0) {
+      return res.status(404).json({ error: 'Processo não encontrado neste cliente' });
+    }
+    const before = prev.rows[0];
+
+    const r = await pgClient.query(
+      'UPDATE public.knowledge_base SET status = $3 WHERE id = $1 AND client_id = $2',
+      [id, req.clientId, normalized]
+    );
+    if (r.rowCount === 0) {
+      return res.status(404).json({ error: 'Processo não encontrado neste cliente' });
+    }
+
+    // Auditoria: atualização de status
+    await writeAudit(pgClient, req, {
+      entityType: 'knowledge_base',
+      entityId: id,
+      action: 'update_status',
+      before,
+      after: { ...before, status: normalized },
+    });
+
     return res.json({ ok: true });
   } catch (err) {
     console.error('KB status update error:', err);
@@ -442,15 +760,42 @@ app.patch('/api/knowledge_base/:id', async (req, res) => {
  * Exclui processo somente se não houver conversas referenciando (FK process_id)
  * Caso haja referências, retorna 409 com code=KB_IN_USE
  */
-app.delete('/api/knowledge_base/:id', async (req, res) => {
+app.delete('/api/knowledge_base/:id', requireCanEditKB(), async (req, res) => {
   try {
     const { id } = req.params;
-    const ref = await pgClient.query('SELECT COUNT(*)::int AS cnt FROM public.conversations WHERE process_id = $1', [id]);
+
+    // Carregar registro para auditoria antes de excluir
+    const prev = await pgClient.query(
+      'SELECT id, title, category, content, status FROM public.knowledge_base WHERE id = $1 AND client_id = $2',
+      [id, req.clientId]
+    );
+    if (prev.rows.length === 0) {
+      return res.status(404).json({ error: 'Processo não encontrado neste cliente' });
+    }
+    const before = prev.rows[0];
+
+    const ref = await pgClient.query(
+      'SELECT COUNT(*)::int AS cnt FROM public.conversations WHERE process_id = $1 AND client_id = $2',
+      [id, req.clientId]
+    );
     const count = ref.rows[0]?.cnt ?? 0;
     if (count > 0) {
       return res.status(409).json({ error: 'Processo em uso em conversas', code: 'KB_IN_USE', referencedCount: count });
     }
-    await pgClient.query('DELETE FROM public.knowledge_base WHERE id = $1', [id]);
+    const r = await pgClient.query('DELETE FROM public.knowledge_base WHERE id = $1 AND client_id = $2', [id, req.clientId]);
+    if (r.rowCount === 0) {
+      return res.status(404).json({ error: 'Processo não encontrado neste cliente' });
+    }
+
+    // Auditoria: exclusão
+    await writeAudit(pgClient, req, {
+      entityType: 'knowledge_base',
+      entityId: id,
+      action: 'delete',
+      before,
+      after: null,
+    });
+
     return res.json({ ok: true });
   } catch (err) {
     console.error('KB delete error:', err);

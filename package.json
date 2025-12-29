@@ -66,6 +66,12 @@
     "tailwindcss-animate": "^1.0.7",
     "undici": "^7.16.0",
     "vaul": "^0.9.9",
+    "argon2": "^0.44.0",
+    "jose": "^5.2.0",
+    "multer": "^2.0.0",
+    "sharp": "^0.33.5",
+    "xlsx": "^0.18.5",
+    "csv-parse": "^5.5.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {

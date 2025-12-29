@@ -16,6 +16,7 @@ import {
   AlertDialogAction,
 } from "./ui/alert-dialog";
 import { Plus, Trash2, Upload, Archive, RotateCcw } from "lucide-react";
+import { getCommonHeaders, getAuthHeader, getClientId } from "@/lib/auth";
 
 interface KnowledgeEntry {
   id: string;
@@ -39,10 +40,13 @@ export const KnowledgeBaseManager = () => {
   const [conflictCount, setConflictCount] = useState<number | null>(null);
   const { toast } = useToast();
 
+  const [canEditKB, setCanEditKB] = useState<boolean>(false);
+
   const API_BASE = import.meta.env?.VITE_API_BASE_URL || "";
 
   useEffect(() => {
     loadEntries();
+    loadPermissions();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -52,8 +56,26 @@ export const KnowledgeBaseManager = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filterStatus]);
 
+  // Reload when client changes (broadcast from ClientSwitcher)
+  useEffect(() => {
+    const handler = () => {
+      loadPermissions();
+      loadEntries();
+      setShowForm(false);
+      setTitle("");
+      setCategory("");
+      setContent("");
+    };
+    window.addEventListener("client:changed", handler as any);
+    return () => {
+      window.removeEventListener("client:changed", handler as any);
+    };
+  }, []);
+
   async function apiGet<T>(path: string): Promise<T> {
-    const res = await fetch(`${API_BASE}${path}`);
+    const res = await fetch(`${API_BASE}${path}`, {
+      headers: getCommonHeaders(),
+    });
     if (!res.ok) {
       const text = await res.text();
       throw new Error(text || `Erro HTTP ${res.status}`);
@@ -64,7 +86,7 @@ export const KnowledgeBaseManager = () => {
   async function apiPost<T>(path: string, body: any): Promise<T> {
     const res = await fetch(`${API_BASE}${path}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getCommonHeaders(),
       body: JSON.stringify(body),
     });
     if (!res.ok) {
@@ -77,7 +99,7 @@ export const KnowledgeBaseManager = () => {
   async function apiPatch<T>(path: string, body: any): Promise<T> {
     const res = await fetch(`${API_BASE}${path}`, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
+      headers: getCommonHeaders(),
       body: JSON.stringify(body),
     });
     const text = await res.text();
@@ -93,7 +115,10 @@ export const KnowledgeBaseManager = () => {
   }
 
   async function apiDelete<T>(path: string): Promise<T> {
-    const res = await fetch(`${API_BASE}${path}`, { method: "DELETE" });
+    const res = await fetch(`${API_BASE}${path}`, {
+      method: "DELETE",
+      headers: getCommonHeaders(),
+    });
     const text = await res.text();
     if (!res.ok) {
       let json: any;
@@ -107,6 +132,27 @@ export const KnowledgeBaseManager = () => {
     try { return JSON.parse(text); } catch { return text as unknown as T; }
   }
 
+  async function loadPermissions() {
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/me`, {
+        headers: {
+          ...getAuthHeader(),
+          "Content-Type": "application/json",
+        },
+      });
+      if (!res.ok) {
+        setCanEditKB(false);
+        return;
+      }
+      const data = await res.json();
+      const cid = typeof getClientId === "function" ? getClientId() : null;
+      const found = (data.clients || []).find((c: any) => c.client_id === cid);
+      setCanEditKB(Boolean(found?.permissions?.can_edit_kb));
+    } catch {
+      setCanEditKB(false);
+    }
+  }
+  
   const loadEntries = async () => {
     try {
       const statusParam = filterStatus === "all" ? "all" : filterStatus;
@@ -123,6 +169,15 @@ export const KnowledgeBaseManager = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    if (!canEditKB) {
+      toast({
+        title: "Ação não permitida",
+        description: "Você não possui permissão para editar a base de conhecimento neste cliente.",
+        variant: "destructive",
+      });
+      return;
+    }
 
     try {
       await apiPost("/api/knowledge_base", {
@@ -151,6 +206,14 @@ export const KnowledgeBaseManager = () => {
   };
 
   const handleDelete = async (id: string) => {
+    if (!canEditKB) {
+      toast({
+        title: "Ação não permitida",
+        description: "Você não possui permissão para editar a base de conhecimento neste cliente.",
+        variant: "destructive",
+      });
+      return;
+    }
     try {
       await apiDelete(`/api/knowledge_base/${id}`);
       toast({ title: "Processo excluído" });
@@ -173,6 +236,14 @@ export const KnowledgeBaseManager = () => {
   };
 
   const handleArchive = async (id: string) => {
+    if (!canEditKB) {
+      toast({
+        title: "Ação não permitida",
+        description: "Você não possui permissão para editar a base de conhecimento neste cliente.",
+        variant: "destructive",
+      });
+      return;
+    }
     try {
       await apiPatch(`/api/knowledge_base/${id}`, { status: "archived" });
       toast({ title: "Processo arquivado" });
@@ -190,6 +261,14 @@ export const KnowledgeBaseManager = () => {
   };
 
   const handleReactivate = async (id: string) => {
+    if (!canEditKB) {
+      toast({
+        title: "Ação não permitida",
+        description: "Você não possui permissão para editar a base de conhecimento neste cliente.",
+        variant: "destructive",
+      });
+      return;
+    }
     try {
       await apiPatch(`/api/knowledge_base/${id}`, { status: "active" });
       toast({ title: "Processo reativado" });
@@ -218,14 +297,16 @@ export const KnowledgeBaseManager = () => {
               <SelectItem value="all">Todos</SelectItem>
             </SelectContent>
           </Select>
-          <Button onClick={() => setShowForm(!showForm)} size="sm">
-            <Plus className="w-4 h-4 mr-2" />
-            Novo Processo
-          </Button>
+          {canEditKB && (
+            <Button onClick={() => setShowForm(!showForm)} size="sm">
+              <Plus className="w-4 h-4 mr-2" />
+              Novo Processo
+            </Button>
+          )}
         </div>
       </div>
 
-      {showForm && (
+      {showForm && canEditKB && (
         <Card className="p-4 border-border">
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
@@ -313,35 +394,39 @@ export const KnowledgeBaseManager = () => {
                 </p>
               </div>
               <div className="flex items-center gap-2">
-                {entry.status === "active" ? (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => handleArchive(entry.id)}
-                    className="text-foreground"
-                  >
-                    <Archive className="w-4 h-4 mr-1" />
-                    Arquivar
-                  </Button>
-                ) : (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => handleReactivate(entry.id)}
-                    className="text-foreground"
-                  >
-                    <RotateCcw className="w-4 h-4 mr-1" />
-                    Reativar
-                  </Button>
-                )}
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => handleDelete(entry.id)}
-                  className="text-destructive hover:text-destructive"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </Button>
+                {canEditKB ? (
+                  <>
+                    {entry.status === "active" ? (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleArchive(entry.id)}
+                        className="text-foreground"
+                      >
+                        <Archive className="w-4 h-4 mr-1" />
+                        Arquivar
+                      </Button>
+                    ) : (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleReactivate(entry.id)}
+                        className="text-foreground"
+                      >
+                        <RotateCcw className="w-4 h-4 mr-1" />
+                        Reativar
+                      </Button>
+                    )}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => handleDelete(entry.id)}
+                      className="text-destructive hover:text-destructive"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </Button>
+                  </>
+                ) : null}
               </div>
             </div>
           </Card>
