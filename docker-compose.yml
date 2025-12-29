@@ -25,18 +25,15 @@ services:
       args:
         # Proxy para estágio de build (npm install etc.)
         # Não inclua domínios do Azure OpenAI em NO_PROXY para que build e runtime usem o proxy corporativo
-        HTTP_PROXY: http://192.168.239.14:8080
-        HTTPS_PROXY: http://192.168.239.14:8080
-        NO_PROXY: localhost,127.0.0.1,::1,postgres,.grupoaec.com.br
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
     container_name: dialogai_app
     environment:
-      # Proxy em runtime (aplicado pelo servidor via undici ProxyAgent)
-      PORT: 3000
-      HTTP_PROXY: http://192.168.239.14:8080
-      HTTPS_PROXY: http://192.168.239.14:8080
-      http_proxy: http://192.168.239.14:8080
-      https_proxy: http://192.168.239.14:8080
-      NO_PROXY: localhost,127.0.0.1,::1,postgres,.grupoaec.com.br
+      # O mesmo aqui para o runtime
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
       
       # Database connection passed from .env
       DATABASE_URL: ${DATABASE_URL}

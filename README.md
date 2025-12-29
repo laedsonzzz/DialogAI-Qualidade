@@ -149,9 +149,9 @@ A API do backend está implementada em [server/index.js](server/index.js:1):
 
 10. Backup/Restaurar dados (volume pgdata)
 - Backup do volume (exemplo):
-  - docker run --rm -v dialogai_pgdata:/data -v ${PWD}:/backup alpine tar czf /backup/pgdata.tar.gz -C /data .
+  - docker run --rm -v dialogai_pgdata:/data -v ${PWD}:/backup slim tar czf /backup/pgdata.tar.gz -C /data .
 - Restore (exemplo):
-  - docker run --rm -v dialogai_pgdata:/data -v ${PWD}:/backup alpine sh -c "rm -rf /data/* && tar xzf /backup/pgdata.tar.gz -C /data"
+  - docker run --rm -v dialogai_pgdata:/data -v ${PWD}:/backup slim sh -c "rm -rf /data/* && tar xzf /backup/pgdata.tar.gz -C /data"
 
 11. Troubleshooting
 - Erro ao conectar no Postgres:
