@@ -231,21 +231,14 @@ async function upsertNode(pgClient, { clientId, kbType, label, nodeType, sourceI
  * Cria aresta entre dois nós existentes.
  */
 async function insertEdge(pgClient, { clientId, kbType, srcNodeId, dstNodeId, relation, properties }) {
-  try {
-    const ins = await pgClient.query(
-      `INSERT INTO public.kb_edges (client_id, kb_type, src_node_id, dst_node_id, relation, properties)
-       VALUES ($1, $2, $3, $4, $5, $6::jsonb)
-       RETURNING id`,
-      [clientId, kbType, srcNodeId, dstNodeId, relation, properties ? JSON.stringify(properties) : JSON.stringify({})]
-    );
-    return ins.rows[0].id;
-  } catch (e) {
-    // Violação de UNIQUE (duplicado) -> ignora
-    if (String(e?.message || '').includes('kb_edges_unique_relation')) {
-      return null;
-    }
-    throw e;
-  }
+  const ins = await pgClient.query(
+    `INSERT INTO public.kb_edges (client_id, kb_type, src_node_id, dst_node_id, relation, properties)
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+     ON CONFLICT (client_id, kb_type, src_node_id, dst_node_id, relation) DO NOTHING
+     RETURNING id`,
+    [clientId, kbType, srcNodeId, dstNodeId, relation, properties ? JSON.stringify(properties) : JSON.stringify({})]
+  );
+  return ins.rows.length > 0 ? ins.rows[0].id : null;
 }
 
 /**
@@ -286,6 +279,8 @@ export async function runGraphExtractionForClient(pgClient, { clientId, kbType =
 
   try {
     for (const row of rows) {
+      await pgClient.query('SAVEPOINT sp_chunk');
+
       const text = piiMode === 'raw' ? row.content : anonymizePII(row.content, 'default');
 
       let extracted;
@@ -293,6 +288,7 @@ export async function runGraphExtractionForClient(pgClient, { clientId, kbType =
         extracted = await callAzureExtractGraph({ text });
       } catch (e) {
         console.warn('Falha ao extrair grafo de chunk, continuando:', e?.message || e);
+        await pgClient.query('ROLLBACK TO SAVEPOINT sp_chunk');
         continue;
       }
 
@@ -349,15 +345,25 @@ export async function runGraphExtractionForClient(pgClient, { clientId, kbType =
         const srcNodeId = srcId || (await ensureNodeId(e.src_label));
         const dstNodeId = dstId || (await ensureNodeId(e.dst_label));
 
-        const edgeId = await insertEdge(pgClient, {
-          clientId,
-          kbType: normalizedType,
-          srcNodeId,
-          dstNodeId,
-          relation: e.relation,
-          properties: e.properties || {},
-        });
-        if (edgeId) edgesCreated++;
+        try {
+          if (!srcNodeId || !dstNodeId) {
+            // IDs inválidos ou não encontrados; pular aresta
+            continue;
+          }
+          await pgClient.query('SAVEPOINT sp_edge');
+          const edgeId = await insertEdge(pgClient, {
+            clientId,
+            kbType: normalizedType,
+            srcNodeId,
+            dstNodeId,
+            relation: e.relation,
+            properties: e.properties || {},
+          });
+          if (edgeId) edgesCreated++;
+        } catch (errEdge) {
+          console.warn('GraphRAG: falha ao inserir aresta; revertendo savepoint e seguindo:', errEdge?.message || errEdge);
+          await pgClient.query('ROLLBACK TO SAVEPOINT sp_edge');
+        }
       }
     }
 
