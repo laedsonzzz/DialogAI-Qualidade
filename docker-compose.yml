@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:18.1
+    image: pgvector/pgvector:pg18
     container_name: dialogai_postgres
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-dialogai}
@@ -38,19 +38,34 @@ services:
       # Database connection passed from .env
       DATABASE_URL: ${DATABASE_URL}
       
-      # Azure OpenAI (from .env)
-      AZURE_OPENAI_ENDPOINT_1: ${AZURE_OPENAI_ENDPOINT_1}
-      AZURE_OPENAI_API_KEY_1: ${AZURE_OPENAI_API_KEY_1}
-      AZURE_OPENAI_API_VERSION_1: ${AZURE_OPENAI_API_VERSION_1}
-      AZURE_OPENAI_DEPLOYMENT_NAME_1: ${AZURE_OPENAI_DEPLOYMENT_NAME_1}
+      # Azure OpenAI (canônicas)
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY}
+      AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION}
+      AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT}
+      AZURE_OPENAI_EMBED_DEPLOYMENT: ${AZURE_OPENAI_EMBED_DEPLOYMENT}
+
+      # RAG tunables
+      RAG_CHUNK_TOKENS: ${RAG_CHUNK_TOKENS:-800}
+      RAG_CHUNK_OVERLAP: ${RAG_CHUNK_OVERLAP:-200}
+      RAG_TOP_K: ${RAG_TOP_K:-8}
+
+      # Upload constraints
+      UPLOAD_MAX_MB: ${UPLOAD_MAX_MB:-10}
+      UPLOAD_ALLOWED_MIME: ${UPLOAD_ALLOWED_MIME:-application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain}
+
+      # Embeddings dimension + Graph RAG flag
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1536}
+      GRAPH_RAG_ENABLED: ${GRAPH_RAG_ENABLED:-true}
 
       # Feature flags
       # Force using chat/completions instead of responses (set to "true" if your resource/version doesn't support Responses API)
       AZURE_USE_CHAT_COMPLETIONS: ${AZURE_USE_CHAT_COMPLETIONS:-false}
       # Debug only: disable TLS verification if a corporate MITM breaks TLS (NOT recommended for production)
-      SSL_INSECURE_SKIP_VERIFY: "true"
+      SSL_INSECURE_SKIP_VERIFY: ${SSL_INSECURE_SKIP_VERIFY:-false}
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     ports:
       - "3000:3000"
     restart: unless-stopped

@@ -269,7 +269,7 @@ const Index = () => {
             <div className="max-w-2xl">
               <div className="inline-flex items-center gap-2 bg-secondary/20 backdrop-blur-sm px-4 py-2 rounded-full mb-6">
                 <Sparkles className="w-5 h-5 text-secondary" />
-                <span className="text-sm font-semibold">Diva 1.0</span>
+                <span className="text-sm font-semibold">Diretoria de Qualidade</span>
               </div>
               <h1 className="text-5xl md:text-6xl font-bold mb-6 leading-tight">
                 Simulador de Atendimento
@@ -348,7 +348,8 @@ const Index = () => {
             <div className="mt-12 text-center">
               <div className="inline-block bg-card/50 backdrop-blur-sm rounded-lg px-6 py-4 border border-border/50">
                 <p className="text-sm text-muted-foreground">
-                  <span className="font-semibold text-foreground">Desenvolvido por:</span> Time de Qualidade Itaú PJ/PF | 
+                  <span className="font-semibold text-foreground">Idealizado e iniciado por:</span> Time de Qualidade Itaú PJ/PF | 
+                  <span className="font-semibold text-foreground"> Aprimorado por:</span> Time MonitorIA | 
                   <span className="ml-2">Versão 1.0.0</span> | 
                   <span className="ml-2">© 2025 Todos os direitos reservados</span>
                 </p>
@@ -657,7 +658,8 @@ const Index = () => {
               <div className="mt-12 text-center">
                 <div className="inline-block bg-card/50 backdrop-blur-sm rounded-lg px-6 py-4 border border-border/50">
                   <p className="text-sm text-muted-foreground">
-                    <span className="font-semibold text-foreground">Desenvolvido por:</span> Time De Qualidade Itaú PF/PJ | 
+                    <span className="font-semibold text-foreground">Idealizado e iniciado por:</span> Time de Qualidade Itaú PJ/PF | 
+                    <span className="font-semibold text-foreground"> Aprimorado por:</span> Time MonitorIA | 
                     <span className="ml-2">Versão 1.0.0</span> | 
                     <span className="ml-2">© 2025 Todos os direitos reservados</span>
                   </p>

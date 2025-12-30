@@ -14,6 +14,9 @@ import { promptsRoutes } from './routes/prompts.js';
 import { importsRoutes } from './routes/imports.js';
 import { adminRoutes } from './routes/admin.js';
 import { profileRoutes } from './routes/profile.js';
+import { kbRoutes } from './routes/kb.js';
+import { graphRoutes } from './routes/graph.js';
+import { createAzureEmbedder } from './services/embeddings.js';
 
 dotenv.config();
 
@@ -34,11 +37,25 @@ app.use('/api/auth', authRoutes(pgClient));
 app.use('/api/admin', requireAuth(pgClient), adminRoutes(pgClient));
 app.use('/api/profile', requireAuth(pgClient), profileRoutes(pgClient));
 
-// Azure OpenAI env
-const AZURE_OPENAI_ENDPOINT = process.env.AZURE_OPENAI_ENDPOINT_1;
-const AZURE_OPENAI_API_KEY = process.env.AZURE_OPENAI_API_KEY_1;
-const AZURE_OPENAI_API_VERSION = process.env.AZURE_OPENAI_API_VERSION_1;
-const AZURE_OPENAI_DEPLOYMENT = process.env.AZURE_OPENAI_DEPLOYMENT_NAME_1;
+// Azure OpenAI env (canônicas com fallback para *_1)
+const AZURE_OPENAI_ENDPOINT =
+  process.env.AZURE_OPENAI_ENDPOINT ||
+  process.env.AZURE_OPENAI_ENDPOINT_1;
+const AZURE_OPENAI_API_KEY =
+  process.env.AZURE_OPENAI_API_KEY ||
+  process.env.AZURE_OPENAI_API_KEY_1;
+const AZURE_OPENAI_API_VERSION =
+  process.env.AZURE_OPENAI_API_VERSION ||
+  process.env.AZURE_OPENAI_API_VERSION_1;
+// Deployment para chat/responses (modelo de texto)
+const AZURE_OPENAI_DEPLOYMENT =
+  process.env.AZURE_OPENAI_DEPLOYMENT ||
+  process.env.AZURE_OPENAI_DEPLOYMENT_NAME ||
+  process.env.AZURE_OPENAI_DEPLOYMENT_NAME_1;
+// Deployment para embeddings (texto -> vetor), usado pelos serviços RAG
+const AZURE_OPENAI_EMBED_DEPLOYMENT =
+  process.env.AZURE_OPENAI_EMBED_DEPLOYMENT ||
+  process.env.AZURE_OPENAI_EMBED_DEPLOYMENT_1;
 
 function assertAzureEnv() {
   if (!AZURE_OPENAI_ENDPOINT || !AZURE_OPENAI_API_KEY || !AZURE_OPENAI_API_VERSION || !AZURE_OPENAI_DEPLOYMENT) {
@@ -128,7 +145,7 @@ async function azureResponses(messages) {
 
     if (status === 404) {
       // 404 geralmente indica endpoint sem barra final, deployment inexistente, ou API version incompatível
-      console.error('Diagnóstico 404: verifique AZURE_OPENAI_ENDPOINT (barra final), AZURE_OPENAI_DEPLOYMENT_NAME_1 (nome do deployment no Azure) e AZURE_OPENAI_API_VERSION_1 (suporte à Responses API). URL usada:', url);
+      console.error('Diagnóstico 404: verifique AZURE_OPENAI_ENDPOINT (barra final), AZURE_OPENAI_DEPLOYMENT/AZURE_OPENAI_DEPLOYMENT_NAME[_1] (nome do deployment no Azure) e AZURE_OPENAI_API_VERSION[_1] (suporte à Responses API). URL usada:', url);
 
       // Fallback automático: tentar chat/completions com o mesmo deployment e api-version
       try {
@@ -196,7 +213,7 @@ async function azureResponses(messages) {
   return text;
 }
 
-function buildSystemPrompt({ scenario, customerProfile, processContent }) {
+function buildSystemPrompt({ scenario, customerProfile, processContent, factsText = '' }) {
   return `### ROLE: PERSONA DE CLIENTE ITAÚ ###
 Você é um ser humano real, cliente do Banco Itaú. Você NÃO é um assistente virtual, NÃO é uma IA e NÃO deve ajudar o interlocutor. Sua única função é vivenciar o cenário de atendimento abaixo.
 
@@ -217,6 +234,14 @@ ${processContent}
 </processo>
 ` : ''}
 
+${factsText ? `
+### FATOS DO CLIENTE (RAG):
+Use as informações factuais abaixo como contexto do cliente. Não leia para o atendente; incorpore naturalmente nas respostas do cliente.
+<fatos>
+${factsText}
+</fatos>
+` : ''}
+
 ### DIRETRIZES DE COMPORTAMENTO:
 - Mantenha o tom de voz brasileiro (natural e humano).
 - REAÇÃO EMOCIONAL: Se o perfil for "irritado", use exclamações e demonstre impaciência. Se for "confuso", peça explicações simples. Se for "calmo", seja cordial.
@@ -227,7 +252,7 @@ ${processContent}
 A partir de agora, o texto recebido é a fala do atendente do banco. Responda estritamente como o cliente.`;
 }
 
-function buildEvaluationPrompt({ transcript, scenario, customerProfile }) {
+function buildEvaluationPrompt({ transcript, scenario, customerProfile, operatorGuidelines = '' }) {
   const transcriptText = (transcript || [])
     .map((msg) => `${msg.role === 'user' ? 'ATENDENTE' : 'CLIENTE'}: ${msg.content}`)
     .join('\n');
@@ -236,6 +261,14 @@ function buildEvaluationPrompt({ transcript, scenario, customerProfile }) {
 
 CENÁRIO: ${scenario}
 PERFIL DO CLIENTE: ${customerProfile}
+
+${operatorGuidelines ? `
+### REGRAS/PILARES DO ATENDIMENTO (KB Operador):
+Considere as diretrizes operacionais e pilares abaixo ao avaliar a conversa.
+<regras>
+${operatorGuidelines}
+</regras>
+` : ''}
 
 Analise a conversa abaixo e avalie a qualidade do atendimento do operador.
 
@@ -280,6 +313,30 @@ function toAzureMessagesFromChat({ systemPrompt, messages }) {
   return [sys, ...userAssistant];
 }
 
+// RAG helpers (embeddings + busca vetorial em kb_chunks)
+const ragEmbedder = createAzureEmbedder();
+
+function toVectorLiteral(arr) {
+ return `[${(Array.isArray(arr) ? arr : []).map((x) => (typeof x === 'number' ? x : Number(x) || 0)).join(',')}]`;
+}
+
+/**
+* Busca TopK fatos na KB por cliente/tipo usando similaridade por vetor (cosine).
+*/
+async function retrieveKbFacts({ clientId, kbType, text, topK, pgClient }) {
+ const [qVec] = await ragEmbedder.embed([String(text || '')]);
+ const vecLit = toVectorLiteral(qVec);
+ let sql = `SELECT kc.id, kc.content, kc.tokens, kc.source_id, ks.title AS source_title
+              FROM public.kb_chunks kc
+              JOIN public.kb_sources ks ON ks.id = kc.source_id
+             WHERE kc.client_id = $1 AND kc.kb_type = $2
+             ORDER BY kc.embedding <=> $3::vector ASC
+             LIMIT $4`;
+ const params = [clientId, kbType, vecLit, Math.max(1, Number(topK || process.env.RAG_TOP_K || 8))];
+ const r = await pgClient.query(sql, params);
+ return r.rows || [];
+}
+
 // Routes
 // Debug: log de todas as requisições para /api
 app.use('/api', (req, _res, next) => {
@@ -293,6 +350,8 @@ app.use('/api/conversations', requireAuth(pgClient), requireTenant(pgClient));
 app.use('/api/chat', requireAuth(pgClient), requireTenant(pgClient));
 app.use('/api/evaluate', requireAuth(pgClient), requireTenant(pgClient));
 app.use('/api/prompts', requireAuth(pgClient), requireTenant(pgClient), promptsRoutes(pgClient));
+app.use('/api/kb', requireAuth(pgClient), requireTenant(pgClient), kbRoutes(pgClient));
+app.use('/api/kb/graph', requireAuth(pgClient), requireTenant(pgClient), graphRoutes(pgClient));
 app.use('/api/imports', requireAuth(pgClient), requireTenant(pgClient), requireCanEditKB(), importsRoutes(pgClient));
 
 // Azure debug endpoints
@@ -473,7 +532,26 @@ app.post('/api/chat', async (req, res) => {
       }
     }
 
-    const systemPrompt = buildSystemPrompt({ scenario, customerProfile, processContent });
+    // Recuperar fatos da KB Cliente (RAG) com base na última mensagem do atendente (user)
+    let queryText = '';
+    if (Array.isArray(messages) && messages.length > 0) {
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const m = messages[i];
+        if (m && m.role === 'user' && typeof m.content === 'string' && m.content.trim().length > 0) {
+          queryText = m.content.trim();
+          break;
+        }
+      }
+    }
+    if (!queryText) {
+      queryText = `${scenario || ''} ${customerProfile || ''}`.trim();
+    }
+
+    const topK = Math.max(1, Number(process.env.RAG_TOP_K || 8));
+    const factsRows = await retrieveKbFacts({ clientId: req.clientId, kbType: 'cliente', text: queryText, topK, pgClient });
+    const factsText = factsRows.map((r, idx) => `- (${idx + 1}) ${r.content}`).join('\n');
+
+    const systemPrompt = buildSystemPrompt({ scenario, customerProfile, processContent, factsText });
     const azureMessages = toAzureMessagesFromChat({ systemPrompt, messages });
     const aiMessageText = await azureResponses(azureMessages);
 
@@ -528,7 +606,13 @@ app.post('/api/evaluate', async (req, res) => {
   try {
     const { transcript, scenario, customerProfile, conversationId } = req.body;
 
-    const evaluationPrompt = buildEvaluationPrompt({ transcript, scenario, customerProfile });
+    // Recuperar regras/pilares da KB Operador (RAG) em função da conversa
+    const queryEvalText = Array.isArray(transcript) ? transcript.map((m) => (m?.content || '')).join(' ') : '';
+    const topK = Math.max(1, Number(process.env.RAG_TOP_K || 8));
+    const rulesRows = await retrieveKbFacts({ clientId: req.clientId, kbType: 'operador', text: queryEvalText, topK, pgClient });
+    const operatorGuidelines = rulesRows.map((r, idx) => `- (${idx + 1}) ${r.content}`).join('\n');
+
+    const evaluationPrompt = buildEvaluationPrompt({ transcript, scenario, customerProfile, operatorGuidelines });
     const messages = [{ role: 'user', content: [{ type: 'text', text: evaluationPrompt }] }];
     const aiText = await azureResponses(messages);
 
