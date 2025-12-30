@@ -281,6 +281,109 @@ export function graphRoutes(pgClient) {
   });
 
   /**
+   * GET /api/kb/graph/node
+   * Query:
+   *  - node_id: UUID ou inteiro (obrigatório)
+   *  - kb_type: 'cliente'|'operador' (opcional, fallback: do nó)
+   *  - source_id: UUID da fonte (opcional, fallback: do nó)
+   *  - pii_mode: 'default'|'raw' (default: 'default')
+   * Retorna o nó sanitizado e até 3 trechos (snippets) de chunks da mesma fonte que contenham o label.
+   */
+  router.get('/node', async (req, res) => {
+    try {
+      const nodeIdRaw = String(req.query?.node_id || '').trim();
+      if (!nodeIdRaw) {
+        return res.status(400).json({ error: 'node_id é obrigatório' });
+      }
+      const uuidRegex = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+      const idIsUUID = uuidRegex.test(nodeIdRaw);
+      const nodeIdNum = Number(nodeIdRaw);
+      const idIsNumeric = Number.isFinite(nodeIdNum) && nodeIdNum > 0;
+      if (!idIsUUID && !idIsNumeric) {
+        return res.status(400).json({ error: 'node_id inválido (esperado UUID ou inteiro positivo)' });
+      }
+
+      const kbTypeQuery = normalizeKbType(req.query?.kb_type);
+      const piiMode = String(req.query?.pii_mode || 'default').trim().toLowerCase() === 'raw' ? 'raw' : 'default';
+      const sourceIdQueryRaw = String(req.query?.source_id || '').trim();
+      const sourceIdQuery = sourceIdQueryRaw.length > 0 ? sourceIdQueryRaw : null;
+
+      // Carregar nó
+      let sqlNode = `SELECT id, label, node_type, source_id, kb_type, properties
+                       FROM public.kb_nodes
+                      WHERE client_id = $1 AND id = $2${idIsUUID ? '::uuid' : ''}`;
+      const paramsNode = [req.clientId, idIsUUID ? nodeIdRaw : nodeIdNum];
+      let nextIdx = paramsNode.length + 1;
+      if (kbTypeQuery) {
+        sqlNode += ` AND kb_type = $${nextIdx}`;
+        paramsNode.push(kbTypeQuery);
+        nextIdx++;
+      }
+      if (sourceIdQuery) {
+        sqlNode += ` AND source_id = $${nextIdx}`;
+        paramsNode.push(sourceIdQuery);
+        nextIdx++;
+      }
+
+      const nodeRes = await pgClient.query(sqlNode, paramsNode);
+      if (nodeRes.rows.length === 0) {
+        return res.status(404).json({ error: 'Nó não encontrado neste cliente' });
+      }
+      const rawNode = nodeRes.rows[0];
+      const safeNode = {
+        ...rawNode,
+        label: typeof rawNode.label === 'string' ? anonymizeRecursive(rawNode.label, piiMode) : rawNode.label,
+        properties: anonymizeRecursive(rawNode.properties, piiMode),
+      };
+
+      // Determinar filtros efetivos para chunks
+      const effKbType = kbTypeQuery || rawNode.kb_type || null;
+      const effSourceId = sourceIdQuery || rawNode.source_id || null;
+
+      // Buscar até 3 trechos de chunks que contenham o label (case-insensitive)
+      const label = String(rawNode.label || '').trim();
+      let sqlChunks = `SELECT kc.id AS chunk_id, kc.content, kc.source_id, kc.kb_type
+                         FROM public.kb_chunks kc
+                         WHERE kc.client_id = $1`;
+      const paramsChunks = [req.clientId];
+      let idx = paramsChunks.length + 1;
+
+      if (effKbType) {
+        sqlChunks += ` AND kc.kb_type = $${idx}`;
+        paramsChunks.push(effKbType);
+        idx++;
+      }
+      if (effSourceId) {
+        sqlChunks += ` AND kc.source_id = $${idx}`;
+        paramsChunks.push(effSourceId);
+        idx++;
+      }
+      if (label.length > 0) {
+        sqlChunks += ` AND kc.content ILIKE $${idx}`;
+        paramsChunks.push(`%${label}%`);
+        idx++;
+      }
+      sqlChunks += ` ORDER BY kc.id ASC LIMIT 3`;
+
+      const chunksRes = await pgClient.query(sqlChunks, paramsChunks);
+      const snippets = (chunksRes.rows || []).map((row) => {
+        const safeContent = typeof row.content === 'string' ? anonymizeRecursive(row.content, piiMode) : row.content;
+        return {
+          chunk_id: row.chunk_id,
+          source_id: row.source_id,
+          kb_type: row.kb_type,
+          content_snippet: typeof safeContent === 'string' ? safeContent.slice(0, 500) : '',
+        };
+      });
+
+      return res.json({ node: safeNode, snippets, kb_type: effKbType, source_id: effSourceId });
+    } catch (err) {
+      console.error('Graph node detail error:', err);
+      return res.status(500).json({ error: 'Erro ao carregar nó' });
+    }
+  });
+
+  /**
    * GET /api/kb/graph/export
    * Query:
    *  - source_id: UUID da fonte (obrigatório)
