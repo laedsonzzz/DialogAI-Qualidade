@@ -24,13 +24,13 @@ import { parse as csvParseSync } from 'csv-parse/sync';
  *   - motivoDistinctIds: mapa { motivo: count distinto de IdAtendimentos }
  *   - warnings: mensagens de aviso (ex: role desconhecido, ordem não numérica)
  */
-export async function parseTranscriptBase({ buffer, filename, mime }) {
+export async function parseTranscriptBase({ buffer, filename, mime, mapping }) {
   const kind = guessFileKind({ filename, mime });
   if (kind === 'csv') {
-    return parseCsv(buffer);
+    return parseCsv(buffer, mapping);
   }
   if (kind === 'xlsx') {
-    return parseXlsx(buffer);
+    return parseXlsx(buffer, mapping);
   }
   throw new Error('Formato de arquivo não suportado. Use CSV ou XLSX');
 }
@@ -69,6 +69,9 @@ function normalizeHeaderName(name) {
   return n; // fallback: retorna original normalizado
 }
 
+// Conjunto de chaves canônicas obrigatórias
+const REQUIRED_CANONICALS = ['idAtendimento', 'message', 'role', 'ordem', 'motivoDeContato'];
+
 /**
  * Retorna o valor de uma coluna a partir de um objeto de record (chaves = cabeçalhos),
  * buscando por equivalência canônica do nome.
@@ -82,6 +85,36 @@ function getRecordValue(record, canonicalKey) {
     }
   }
   return undefined;
+}
+
+/**
+ * Variante que dá prioridade ao mapeamento explícito (canonicalKey -> originalHeader),
+ * com quedas para match case-insensitive e por normalização, e por fim usa getRecordValue().
+ */
+function getRecordValueMapped(record, canonicalKey, mapping) {
+  if (mapping && mapping[canonicalKey]) {
+    const wanted = String(mapping[canonicalKey]).trim();
+    if (wanted) {
+      // match exato
+      if (Object.prototype.hasOwnProperty.call(record, wanted)) {
+        return record[wanted];
+      }
+      // match case-insensitive
+      const keys = Object.keys(record || {});
+      const foundKey = keys.find((k) => String(k).trim().toLowerCase() === wanted.toLowerCase());
+      if (foundKey) {
+        return record[foundKey];
+      }
+      // match por normalização
+      const targetNorm = normalizeHeaderName(wanted);
+      for (const k of keys) {
+        if (normalizeHeaderName(k) === targetNorm) {
+          return record[k];
+        }
+      }
+    }
+  }
+  return getRecordValue(record, canonicalKey);
 }
 
 /**
@@ -150,14 +183,24 @@ function computeStats(rows) {
 /**
  * Parser para CSV (buffer).
  */
-function parseCsv(buffer) {
+function parseCsv(buffer, mapping) {
   const text = bufferToUtf8(buffer);
+
+  function detectCsvDelimiter(src) {
+    const firstLine = (String(src || '').split(/\r?\n/).find((l) => l.trim().length > 0) || '');
+    const sc = (firstLine.match(/;/g) || []).length;
+    const cc = (firstLine.match(/,/g) || []).length;
+    return sc > cc ? ';' : ',';
+  }
+
   let records;
   try {
+    const delimiter = detectCsvDelimiter(text);
     records = csvParseSync(text, {
       columns: true,
       skip_empty_lines: true,
       trim: true,
+      delimiter,
     });
   } catch (e) {
     throw new Error(`Falha ao ler CSV: ${String(e?.message || e)}`);
@@ -176,11 +219,11 @@ function parseCsv(buffer) {
   for (let i = 0; i < records.length; i++) {
     const rec = records[i];
 
-    const idAt = sanitizeText(getRecordValue(rec, 'idAtendimento'));
-    const msg = sanitizeText(getRecordValue(rec, 'message'));
-    const role = getRecordValue(rec, 'role');
-    const ordemVal = getRecordValue(rec, 'ordem');
-    const motivo = sanitizeText(getRecordValue(rec, 'motivoDeContato'));
+    const idAt = sanitizeText(getRecordValueMapped(rec, 'idAtendimento', mapping));
+    const msg = sanitizeText(getRecordValueMapped(rec, 'message', mapping));
+    const role = getRecordValueMapped(rec, 'role', mapping);
+    const ordemVal = getRecordValueMapped(rec, 'ordem', mapping);
+    const motivo = sanitizeText(getRecordValueMapped(rec, 'motivoDeContato', mapping));
 
     const missing = [];
     if (!idAt) missing.push('IdAtendimento');
@@ -226,7 +269,7 @@ function parseCsv(buffer) {
  * Parser para XLSX (planilha Excel).
  * Considera a primeira planilha e a primeira linha como cabeçalho.
  */
-function parseXlsx(buffer) {
+function parseXlsx(buffer, mapping) {
   let wb;
   try {
     wb = xlsx.read(buffer, { type: 'buffer' });
@@ -251,11 +294,11 @@ function parseXlsx(buffer) {
   for (let i = 0; i < records.length; i++) {
     const rec = records[i];
 
-    const idAt = sanitizeText(getRecordValue(rec, 'idAtendimento'));
-    const msg = sanitizeText(getRecordValue(rec, 'message'));
-    const role = getRecordValue(rec, 'role');
-    const ordemVal = getRecordValue(rec, 'ordem');
-    const motivo = sanitizeText(getRecordValue(rec, 'motivoDeContato'));
+    const idAt = sanitizeText(getRecordValueMapped(rec, 'idAtendimento', mapping));
+    const msg = sanitizeText(getRecordValueMapped(rec, 'message', mapping));
+    const role = getRecordValueMapped(rec, 'role', mapping);
+    const ordemVal = getRecordValueMapped(rec, 'ordem', mapping);
+    const motivo = sanitizeText(getRecordValueMapped(rec, 'motivoDeContato', mapping));
 
     const missing = [];
     if (!idAt) missing.push('IdAtendimento');
@@ -297,6 +340,97 @@ function parseXlsx(buffer) {
   return { rows, stats, warnings };
 }
 
+/**
+ * Gera preview de cabeçalhos e amostra de linhas, além de sugestão de mapeamento canônico.
+ * - Usa a primeira aba para XLSX
+ * - Autodetecta delimitador ; ou , em CSV
+ * - Amostra limitada a até 10 linhas
+ */
+export async function getHeadersPreview({ buffer, filename, mime }) {
+  const kind = guessFileKind({ filename, mime });
+  if (kind === 'csv') {
+    const text = bufferToUtf8(buffer);
+
+    // detecta delimitador e parse completo (amostra será fatiada)
+    const firstLine = (String(text || '').split(/\r?\n/).find((l) => l.trim().length > 0) || '');
+    const sc = (firstLine.match(/;/g) || []).length;
+    const cc = (firstLine.match(/,/g) || []).length;
+    const delimiter = sc > cc ? ';' : ',';
+
+    let records = [];
+    try {
+      records = csvParseSync(text, {
+        columns: true,
+        skip_empty_lines: true,
+        trim: true,
+        delimiter,
+      });
+    } catch (e) {
+      throw new Error(`Falha ao ler CSV para preview: ${String(e?.message || e)}`);
+    }
+
+    const headers = Array.isArray(records) && records.length > 0 ? Object.keys(records[0]) : (firstLine ? firstLine.split(delimiter) : []);
+    const normIndex = {};
+    for (const h of headers) {
+      normIndex[normalizeHeaderName(h)] = h;
+    }
+    const suggested = {};
+    for (const key of REQUIRED_CANONICALS) {
+      if (normIndex[key]) suggested[key] = normIndex[key];
+    }
+    const canonicalComplete = REQUIRED_CANONICALS.every((k) => !!suggested[k]);
+    const sample = (records || []).slice(0, 10);
+
+    return {
+      ok: true,
+      kind: 'csv',
+      delimiter,
+      headers,
+      suggestedMapping: suggested,
+      canonicalComplete,
+      sample,
+    };
+  }
+
+  if (kind === 'xlsx') {
+    let wb;
+    try {
+      wb = xlsx.read(buffer, { type: 'buffer' });
+    } catch (e) {
+      throw new Error(`Falha ao ler XLSX para preview: ${String(e?.message || e)}`);
+    }
+    const sheetName = wb.SheetNames[0] || null;
+    if (!sheetName) {
+      return { ok: true, kind: 'xlsx', sheet: null, headers: [], suggestedMapping: {}, canonicalComplete: false, sample: [] };
+    }
+    const sheet = wb.Sheets[sheetName];
+    const records = xlsx.utils.sheet_to_json(sheet, { defval: '' });
+    const headers = Array.isArray(records) && records.length > 0 ? Object.keys(records[0]) : [];
+    const normIndex = {};
+    for (const h of headers) {
+      normIndex[normalizeHeaderName(h)] = h;
+    }
+    const suggested = {};
+    for (const key of REQUIRED_CANONICALS) {
+      if (normIndex[key]) suggested[key] = normIndex[key];
+    }
+    const canonicalComplete = REQUIRED_CANONICALS.every((k) => !!suggested[k]);
+    const sample = (records || []).slice(0, 10);
+
+    return {
+      ok: true,
+      kind: 'xlsx',
+      sheet: sheetName,
+      headers,
+      suggestedMapping: suggested,
+      canonicalComplete,
+      sample,
+    };
+  }
+
+  throw new Error('Formato de arquivo não suportado para preview. Use CSV ou XLSX');
+}
+
 function bufferToUtf8(buf) {
   if (typeof buf === 'string') return buf;
   if (buf instanceof Uint8Array) return new TextDecoder('utf-8').decode(buf);
@@ -309,4 +443,4 @@ function bufferToUtf8(buf) {
   }
 }
 
-export default { parseTranscriptBase };
+export default { parseTranscriptBase, getHeadersPreview };

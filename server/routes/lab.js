@@ -2,7 +2,7 @@ import express from 'express';
 import multer from 'multer';
 import { writeAudit } from '../middleware/audit.js';
 import { requireCanManageScenarios } from '../middleware/permissions.js';
-import { parseTranscriptBase } from '../services/lab_parser.js';
+import { parseTranscriptBase, getHeadersPreview } from '../services/lab_parser.js';
 import { startLabAnalysis } from '../jobs/lab_analysis.js';
 import { chunkText } from '../services/chunker.js';
 import { createAzureEmbedder } from '../services/embeddings.js';
@@ -26,6 +26,9 @@ const upload = multer({
   },
 });
 
+// Conjunto de chaves canônicas obrigatórias
+const REQUIRED_CANONICALS = ['IdAtendimento', 'Message', 'Role', 'Ordem', 'MotivoDeContato'];
+
 function computeStatsFromRows(rows) {
   const ids = new Set();
   const motivoIds = new Map(); // motivo -> Set(ids)
@@ -46,10 +49,59 @@ export function labRoutes(pgClient) {
   const router = express.Router();
 
   /**
-   * POST /api/lab/scenarios/upload
+   * POST /api/lab/scenarios/preview
    * Multipart: file (CSV ou XLSX)
+   * - Extrai cabeçalhos originais
+   * - Sugere mapeamento canônico
+   * - Retorna amostra de até 10 linhas
+   * - Usa primeira aba (XLSX) e autodetecta ; ou , (CSV)
+   */
+  router.post('/scenarios/preview', requireCanManageScenarios(), upload.single('file'), async (req, res) => {
+    try {
+      const file = req.file;
+      if (!file || !file.buffer) {
+        return res.status(400).json({ error: 'Nenhum arquivo enviado (campo: file)' });
+      }
+
+      let preview;
+      try {
+        preview = await getHeadersPreview({
+          buffer: file.buffer,
+          filename: file.originalname,
+          mime: file.mimetype,
+        });
+      } catch (e) {
+        return res.status(400).json({ error: String(e?.message || e) });
+      }
+
+      const headers = Array.isArray(preview.headers) ? preview.headers : [];
+      const insufficientColumns = headers.length < REQUIRED_CANONICALS.length;
+
+      return res.json({
+        ok: true,
+        kind: preview.kind,
+        delimiter: preview.delimiter || null,
+        headers,
+        suggestedMapping: preview.suggestedMapping || {},
+        canonicalComplete: Boolean(preview.canonicalComplete),
+        insufficientColumns,
+        requiredCanonicals: REQUIRED_CANONICALS,
+        sample: preview.sample || [],
+      });
+    } catch (err) {
+      console.error('Lab preview error:', err);
+      return res.status(500).json({ error: 'Erro ao gerar preview' });
+    }
+  });
+
+  /**
+   * POST /api/lab/scenarios/upload
+   * Multipart: file (CSV ou XLSX), mapping (JSON opcional)
+   * - Valida cabeçalhos: se < 5, retorna 400 code=COLS_INSUFFICIENT
+   * - Se mapping não enviado e cabeçalhos já canônicos, usa sugestão do preview
+   * - Se mapping enviado, valida unicidade e cobertura das 5 chaves canônicas
    * - Cria lab_runs
-   * - Faz parsing da base, valida colunas
+   * - Faz parsing com mapeamento para normalizar (IdAtendimento, Message, Role, Ordem, MotivoDeContato)
    * - Filtra roles desconhecidos
    * - Insere em lab_transcripts_raw
    * - Inicializa lab_progress por motivo com denominadores (distinct IdAtendimento)
@@ -59,6 +111,77 @@ export function labRoutes(pgClient) {
       const file = req.file;
       if (!file || !file.buffer) {
         return res.status(400).json({ error: 'Nenhum arquivo enviado (campo: file)' });
+      }
+
+      // Parse mapping JSON (opcional)
+      let mapping = undefined;
+      if (req.body && typeof req.body.mapping === 'string') {
+        try {
+          mapping = JSON.parse(req.body.mapping);
+        } catch {
+          return res.status(400).json({ error: 'mapping inválido (JSON malformado)', code: 'MAP_JSON_INVALID' });
+        }
+      }
+
+      // Preview para validar colunas e obter sugestão de mapeamento
+      let preview;
+      try {
+        preview = await getHeadersPreview({
+          buffer: file.buffer,
+          filename: file.originalname,
+          mime: file.mimetype,
+        });
+      } catch (e) {
+        return res.status(400).json({ error: String(e?.message || e) });
+      }
+
+      const headers = Array.isArray(preview.headers) ? preview.headers : [];
+      if (headers.length < REQUIRED_CANONICALS.length) {
+        return res.status(400).json({ error: 'Arquivo possui menos colunas do que o necessário', code: 'COLS_INSUFFICIENT', required: REQUIRED_CANONICALS.length, provided: headers.length });
+      }
+
+      // Se não veio mapping e já está canônico, usa sugestão automaticamente
+      if (!mapping && preview.canonicalComplete) {
+        mapping = preview.suggestedMapping || {};
+      }
+
+      // Se mapping veio do cliente, validar cobertura e unicidade
+      if (mapping) {
+        // mapping esperado no formato: { 'IdAtendimento'|'Message'|'Role'|'Ordem'|'MotivoDeContato' -> nome_da_coluna_origem }
+        // Adaptar para chaves canônicas lowerCamel usadas no parser:
+        // parser espera: idAtendimento, message, role, ordem, motivoDeContato
+        const canonMap = {
+          IdAtendimento: 'idAtendimento',
+          Message: 'message',
+          Role: 'role',
+          Ordem: 'ordem',
+          MotivoDeContato: 'motivoDeContato',
+        };
+
+        const values = [];
+        for (const humanKey of REQUIRED_CANONICALS) {
+          const internalKey = canonMap[humanKey];
+          const src = mapping[humanKey] || mapping[internalKey]; // aceitar qualquer um dos dois formatos
+          if (!src || typeof src !== 'string') {
+            return res.status(400).json({ error: `Mapping incompleto: faltando "${humanKey}"`, code: 'MAP_INCOMPLETE', missing: humanKey });
+          }
+          // validar existência no header do arquivo
+          const found = headers.find((h) => String(h).trim().toLowerCase() === String(src).trim().toLowerCase());
+          if (!found) {
+            return res.status(400).json({ error: `Coluna mapeada para "${humanKey}" não existe no arquivo: ${src}`, code: 'MAP_COLUMN_NOT_FOUND', column: src });
+          }
+          values.push(found);
+          // normalizar para o formato interno esperado pelo parser
+          mapping[internalKey] = found;
+        }
+        // checar duplicidade de colunas escolhidas
+        const set = new Set(values.map((v) => String(v).trim().toLowerCase()));
+        if (set.size !== values.length) {
+          return res.status(400).json({ error: 'Mapping inválido: colunas duplicadas para chaves diferentes', code: 'MAP_DUPLICATE_COLUMNS' });
+        }
+      } else {
+        // Não há mapping e cabeçalhos não são canônicos -> exigir mapeamento
+        return res.status(400).json({ error: 'Mapeamento de colunas é obrigatório para este arquivo', code: 'MAP_REQUIRED' });
       }
 
       await pgClient.query('BEGIN');
@@ -73,10 +196,18 @@ export function labRoutes(pgClient) {
       const run = runIns.rows[0];
       const runId = run.id;
 
-      // Parser
+      // Parser com mapeamento explícito
       let parsed;
       try {
-        parsed = await parseTranscriptBase({ buffer: file.buffer, filename: file.originalname, mime: file.mimetype });
+        // O parser espera mapping no formato interno: { idAtendimento, message, role, ordem, motivoDeContato }
+        const internalMapping = {
+          idAtendimento: mapping.idAtendimento,
+          message: mapping.message,
+          role: mapping.role,
+          ordem: mapping.ordem,
+          motivoDeContato: mapping.motivoDeContato,
+        };
+        parsed = await parseTranscriptBase({ buffer: file.buffer, filename: file.originalname, mime: file.mimetype, mapping: internalMapping });
       } catch (e) {
         await pgClient.query('ROLLBACK');
         return res.status(400).json({ error: String(e?.message || e) });

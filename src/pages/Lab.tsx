@@ -7,6 +7,9 @@ import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { useToast } from "@/hooks/use-toast";
 import { getAuthHeader, getClientId, getCommonHeaders } from "@/lib/auth";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { Info } from "lucide-react";
 
 type UploadResponse = {
   ok: boolean;
@@ -74,6 +77,130 @@ const Lab: React.FC = () => {
   const [authChecked, setAuthChecked] = useState(false);
   const [canManage, setCanManage] = useState(false);
 
+  // Preview/mapeamento de colunas
+  const requiredCanonicals = useMemo(() => ([
+    "IdAtendimento",
+    "Message",
+    "Role",
+    "Ordem",
+    "MotivoDeContato",
+  ]), []);
+  const canonicalDescriptions: Record<string, string> = {
+    IdAtendimento: "ID único por atendimento (agrupa as mensagens de uma conversa real).",
+    Message: "Texto da mensagem enviada.",
+    Role: "Quem enviou: agent (atendente), bot (assistente auxiliar), user (cliente).",
+    Ordem: "Ordem sequencial das mensagens dentro de um IdAtendimento.",
+    MotivoDeContato: "Motivo do contato (define o cenário).",
+  };
+
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewHeaders, setPreviewHeaders] = useState<string[]>([]);
+  const [previewSuggestedMapping, setPreviewSuggestedMapping] = useState<Record<string, string>>({});
+  const [canonicalComplete, setCanonicalComplete] = useState<boolean>(false);
+  const [insufficientColumns, setInsufficientColumns] = useState<boolean>(false);
+  // mapping com chaves humanizadas (IdAtendimento, Message, Role, Ordem, MotivoDeContato) -> nome de coluna do arquivo
+  const [mapping, setMapping] = useState<Record<string, string>>({});
+  const [mappingError, setMappingError] = useState<string | null>(null);
+
+  function resetPreviewStates() {
+    setPreviewHeaders([]);
+    setPreviewSuggestedMapping({});
+    setCanonicalComplete(false);
+    setInsufficientColumns(false);
+    setMapping({});
+    setMappingError(null);
+  }
+
+  // Converte keys internas do preview para chaves humanizadas
+  function toHumanMapping(internal: Record<string, string>): Record<string, string> {
+    const map: Record<string, string> = {};
+    const conv: Record<string, string> = {
+      idAtendimento: "IdAtendimento",
+      message: "Message",
+      role: "Role",
+      ordem: "Ordem",
+      motivoDeContato: "MotivoDeContato",
+    };
+    Object.keys(internal || {}).forEach((k) => {
+      const h = conv[k];
+      if (h) map[h] = internal[k];
+    });
+    return map;
+  }
+
+  async function fetchPreview(f: File) {
+    setPreviewLoading(true);
+    setMappingError(null);
+    try {
+      const form = new FormData();
+      form.append("file", f);
+      const headers: Record<string, string> = {
+        ...getAuthHeader(),
+      };
+      const cid = getClientId();
+      if (cid) headers["X-Client-Id"] = cid;
+
+      const res = await fetch(`${API_BASE}/api/lab/scenarios/preview`, {
+        method: "POST",
+        headers,
+        body: form,
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error((data as any)?.error || `Erro HTTP ${res.status}`);
+      }
+      const headersArr = Array.isArray(data.headers) ? data.headers : [];
+      setPreviewHeaders(headersArr);
+      setCanonicalComplete(Boolean(data.canonicalComplete));
+      setInsufficientColumns(Boolean(data.insufficientColumns));
+      const suggested = data.suggestedMapping || {};
+      setPreviewSuggestedMapping(suggested);
+      // Prepopula mapping humanizado com a sugestão (quando presente)
+      const hm = toHumanMapping(suggested);
+      setMapping(hm);
+    } catch (e: any) {
+      setMappingError(String(e?.message || e));
+      setPreviewHeaders([]);
+      setPreviewSuggestedMapping({});
+      setCanonicalComplete(false);
+      setInsufficientColumns(false);
+      setMapping({});
+    } finally {
+      setPreviewLoading(false);
+    }
+  }
+
+  function validateMapping(current: Record<string, string>): string | null {
+    // Se canonicalComplete, mapeamento pode ser omitido (usaremos sugestão)
+    if (canonicalComplete) return null;
+    // Verifica cobertura das 5 chaves e unicidade
+    const chosen: string[] = [];
+    for (const key of requiredCanonicals) {
+      const v = (current[key] || "").trim();
+      if (!v) return `Selecione a coluna para "${key}"`;
+      chosen.push(v.toLowerCase());
+    }
+    const set = new Set(chosen);
+    if (set.size !== chosen.length) {
+      return "Cada coluna canônica deve apontar para uma coluna diferente do arquivo (mapeamentos duplicados encontrados).";
+    }
+    // Colunas insuficientes
+    if (insufficientColumns) {
+      return `Arquivo possui menos colunas (${previewHeaders.length}) do que o necessário (${requiredCanonicals.length}).`;
+    }
+    return null;
+  }
+
+  const canUpload = useMemo(() => {
+    if (!file) return false;
+    if (uploading) return false;
+    if (insufficientColumns) return false;
+    if (canonicalComplete) return true;
+    const err = validateMapping(mapping);
+    return !err;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [file, uploading, insufficientColumns, canonicalComplete, mapping]);
+
   async function ensurePermission() {
     try {
       const res = await fetch(`${API_BASE}/api/auth/me`, {
@@ -133,6 +260,10 @@ const Lab: React.FC = () => {
   function onSelectFile(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0] || null;
     setFile(f || null);
+    resetPreviewStates();
+    if (f) {
+      fetchPreview(f);
+    }
   }
 
   async function handleUpload() {
@@ -140,10 +271,24 @@ const Lab: React.FC = () => {
       toast({ title: "Selecione um arquivo", description: "CSV ou XLSX com colunas esperadas", variant: "destructive" });
       return;
     }
+    // Valida mapeamento quando necessário
+    const err = validateMapping(mapping);
+    if (err) {
+      setMappingError(err);
+      toast({ title: "Mapeamento inválido", description: err, variant: "destructive" });
+      return;
+    }
+
     setUploading(true);
     try {
       const form = new FormData();
       form.append("file", file);
+
+      // Inclui mapping quando necessário ou quando já canônico (para transparência)
+      if (canonicalComplete || Object.keys(mapping).length > 0) {
+        // Envia no formato humanizado (backend aceita humano ou interno)
+        form.append("mapping", JSON.stringify(mapping));
+      }
 
       // Não defina Content-Type manualmente em FormData
       const headers: Record<string, string> = {
@@ -296,9 +441,74 @@ const Lab: React.FC = () => {
               <Input type="file" accept=".csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" onChange={onSelectFile} />
             </div>
             <div className="flex items-end">
-              <Button onClick={handleUpload} disabled={!file || uploading}>{uploading ? "Enviando..." : "Enviar"}</Button>
+              <Button onClick={handleUpload} disabled={!canUpload}>{uploading ? "Enviando..." : "Enviar"}</Button>
             </div>
           </div>
+
+          {/* Mensagens de preview e validação */}
+          {previewLoading && (
+            <div className="mt-3 text-sm text-muted-foreground">Lendo cabeçalhos e gerando preview...</div>
+          )}
+          {mappingError && (
+            <div className="mt-3 text-sm text-destructive">{mappingError}</div>
+          )}
+          {insufficientColumns && (
+            <div className="mt-3 text-sm text-destructive">
+              Arquivo possui menos colunas ({previewHeaders.length}) do que o necessário ({requiredCanonicals.length}). Selecione outro arquivo.
+            </div>
+          )}
+
+          {/* UI de mapeamento - exibida somente quando não estiver totalmente canônico */}
+          {file && !previewLoading && !insufficientColumns && !canonicalComplete && previewHeaders.length > 0 && (
+            <div className="mt-4 border-t pt-4">
+              <h3 className="font-medium mb-2">Mapeamento de Colunas</h3>
+              <p className="text-xs text-muted-foreground mb-3">
+                Selecione para cada campo canônico a coluna correspondente do seu arquivo. Colunas extras serão ignoradas.
+              </p>
+              <div className="grid gap-3 md:grid-cols-2">
+                {requiredCanonicals.map((ckey) => (
+                  <div key={ckey} className="grid gap-1">
+                    <div className="flex items-center gap-2">
+                      <Label>{ckey}</Label>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-muted text-foreground cursor-default">
+                            <Info className="w-3 h-3" />
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent className="max-w-xs">
+                          <p className="text-xs">{canonicalDescriptions[ckey]}</p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </div>
+                    <Select
+                      value={mapping[ckey] || ""}
+                      onValueChange={(v) => {
+                        const next = { ...mapping, [ckey]: v };
+                        setMapping(next);
+                        const err = validateMapping(next);
+                        setMappingError(err);
+                      }}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Selecione a coluna..." />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {previewHeaders.map((h) => (
+                          <SelectItem key={`${ckey}-${h}`} value={h}>{h}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                ))}
+              </div>
+              {mappingError && (
+                <p className="text-xs text-destructive mt-2">{mappingError}</p>
+              )}
+            </div>
+          )}
+
+          {/* Avisos pós-upload */}
           {warnings.length > 0 && (
             <div className="mt-3">
               <p className="text-sm text-muted-foreground">Avisos:</p>
