@@ -367,6 +367,7 @@ export function adminRoutes(pgClient) {
         can_edit_kb = false,
         can_view_team_chats = false,
         can_view_all_client_chats = false,
+        can_manage_scenarios = false,
       } = req.body || {};
 
       if (!user_id || !client_id || !tipo_usuario) {
@@ -399,17 +400,18 @@ export function adminRoutes(pgClient) {
 
       // Upsert by unique (user_id, client_id)
       const up = await pgClient.query(
-        `INSERT INTO public.user_clients (user_id, client_id, tipo_usuario, can_start_chat, can_edit_kb, can_view_team_chats, can_view_all_client_chats, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, now(), now())
+        `INSERT INTO public.user_clients (user_id, client_id, tipo_usuario, can_start_chat, can_edit_kb, can_view_team_chats, can_view_all_client_chats, can_manage_scenarios, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), now())
          ON CONFLICT (user_id, client_id) DO UPDATE
            SET tipo_usuario = EXCLUDED.tipo_usuario,
                can_start_chat = EXCLUDED.can_start_chat,
                can_edit_kb = EXCLUDED.can_edit_kb,
                can_view_team_chats = EXCLUDED.can_view_team_chats,
                can_view_all_client_chats = EXCLUDED.can_view_all_client_chats,
+               can_manage_scenarios = EXCLUDED.can_manage_scenarios,
                updated_at = now()
-         RETURNING user_id, client_id, tipo_usuario, can_start_chat, can_edit_kb, can_view_team_chats, can_view_all_client_chats`,
-        [user_id, client_id, tipo, can_start_chat, can_edit_kb, can_view_team_chats, can_view_all_client_chats]
+         RETURNING user_id, client_id, tipo_usuario, can_start_chat, can_edit_kb, can_view_team_chats, can_view_all_client_chats, can_manage_scenarios`,
+        [user_id, client_id, tipo, can_start_chat, can_edit_kb, can_view_team_chats, can_view_all_client_chats, can_manage_scenarios]
       );
       const row = up.rows[0];
       const syntheticId = `${row.user_id}:${row.client_id}`;
@@ -460,7 +462,7 @@ export function adminRoutes(pgClient) {
 
       let sql = `SELECT (uc.user_id::text || ':' || uc.client_id::text) AS id,
                         uc.user_id, uc.client_id, uc.tipo_usuario,
-                        uc.can_start_chat, uc.can_edit_kb, uc.can_view_team_chats, uc.can_view_all_client_chats,
+                        uc.can_start_chat, uc.can_edit_kb, uc.can_view_team_chats, uc.can_view_all_client_chats, uc.can_manage_scenarios,
                         u.email, u.full_name, c.name AS client_name, c.code AS client_code
                    FROM public.user_clients uc
                    JOIN public.users u ON u.id = uc.user_id
@@ -504,7 +506,7 @@ export function adminRoutes(pgClient) {
       }
 
       const prev = await pgClient.query(
-        `SELECT user_id, client_id, tipo_usuario, can_start_chat, can_edit_kb, can_view_team_chats, can_view_all_client_chats
+        `SELECT user_id, client_id, tipo_usuario, can_start_chat, can_edit_kb, can_view_team_chats, can_view_all_client_chats, can_manage_scenarios
            FROM public.user_clients
           WHERE user_id = $1 AND client_id = $2`,
         [userId, clientId]

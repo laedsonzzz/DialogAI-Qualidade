@@ -327,7 +327,7 @@ export function authRoutes(pgClient) {
 
       const perms = await pgClient.query(
         `SELECT uc.client_id, c.name AS client_name, c.code AS client_code,
-                uc.tipo_usuario, uc.can_start_chat, uc.can_edit_kb, uc.can_view_team_chats, uc.can_view_all_client_chats
+                uc.tipo_usuario, uc.can_start_chat, uc.can_edit_kb, uc.can_view_team_chats, uc.can_view_all_client_chats, uc.can_manage_scenarios
            FROM public.user_clients uc
            JOIN public.clients c ON c.id = uc.client_id
           WHERE uc.user_id = $1
@@ -347,6 +347,7 @@ export function authRoutes(pgClient) {
             can_edit_kb: r.can_edit_kb,
             can_view_team_chats: r.can_view_team_chats,
             can_view_all_client_chats: r.can_view_all_client_chats,
+            can_manage_scenarios: r.can_manage_scenarios,
           },
         })),
       });

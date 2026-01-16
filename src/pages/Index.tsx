@@ -25,48 +25,6 @@ interface KnowledgeEntry {
   category: string;
 }
 
-const scenarios = [
-  {
-    id: "limite",
-    title: "Solicitação de Aumento de Limite",
-    description: "Cliente deseja aumentar o limite do cartão de crédito",
-    profiles: [
-      { id: "calmo", label: "Cliente Calmo", emotion: "😊" },
-      { id: "ansioso", label: "Cliente Ansioso", emotion: "😰" },
-      { id: "irritado", label: "Cliente Irritado", emotion: "😠" },
-    ],
-  },
-  {
-    id: "cobranca",
-    title: "Contestação de Cobrança",
-    description: "Cliente contesta uma cobrança não reconhecida",
-    profiles: [
-      { id: "confuso", label: "Cliente Confuso", emotion: "🤔" },
-      { id: "preocupado", label: "Cliente Preocupado", emotion: "😟" },
-      { id: "irritado", label: "Cliente Muito Irritado", emotion: "😡" },
-    ],
-  },
-  {
-    id: "cartao",
-    title: "Problema com Cartão",
-    description: "Cliente com problema de cartão bloqueado ou não recebido",
-    profiles: [
-      { id: "calmo", label: "Cliente Calmo", emotion: "😊" },
-      { id: "urgente", label: "Cliente com Urgência", emotion: "⏰" },
-      { id: "frustrado", label: "Cliente Frustrado", emotion: "😤" },
-    ],
-  },
-  {
-    id: "credito",
-    title: "Solicitação de Crédito",
-    description: "Cliente interessado em contratar um empréstimo",
-    profiles: [
-      { id: "empolgado", label: "Cliente Empolgado", emotion: "🤩" },
-      { id: "cauteloso", label: "Cliente Cauteloso", emotion: "🤨" },
-      { id: "desconfiado", label: "Cliente Desconfiado", emotion: "🧐" },
-    ],
-  },
-];
 
 const Index = () => {
   const [selectedScenario, setSelectedScenario] = useState<string | null>(null);
@@ -78,9 +36,27 @@ const Index = () => {
   const [canStartChat, setCanStartChat] = useState<boolean>(false);
   const [isAdmin, setIsAdmin] = useState<boolean>(false);
   const [hasAdmin, setHasAdmin] = useState<boolean>(true);
+  const [scenarios, setScenarios] = useState<any[]>([]);
+  const [canManageScenarios, setCanManageScenarios] = useState<boolean>(false);
 
   const API_BASE = import.meta.env?.VITE_API_BASE_URL || "";
   const navigate = useNavigate();
+
+  const loadScenarios = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/scenarios`, {
+        headers: getCommonHeaders(),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error((data as any)?.error || `Erro HTTP ${res.status}`);
+      }
+      setScenarios(Array.isArray(data) ? data : []);
+    } catch (error) {
+      console.error("Erro ao carregar cenários:", error);
+      setScenarios([]);
+    }
+  };
 
   // Carrega permissões do usuário para o cliente selecionado (can_start_chat)
   const loadPermissions = async () => {
@@ -93,21 +69,25 @@ const Index = () => {
       });
       if (!res.ok) {
         setCanStartChat(false);
+        setCanManageScenarios(false);
         return;
       }
       const data = await res.json();
       const cid = getClientId();
       const found = (data.clients || []).find((c: any) => c.client_id === cid);
       setCanStartChat(Boolean(found?.permissions?.can_start_chat));
+      setCanManageScenarios(Boolean(found?.permissions?.can_manage_scenarios));
       setIsAdmin(Boolean(data?.user?.is_admin));
     } catch {
       setCanStartChat(false);
+      setCanManageScenarios(false);
     }
   };
 
   useEffect(() => {
     loadPermissions();
     loadAdminStatus();
+    loadScenarios();
   }, []);
 
   async function loadAdminStatus() {
@@ -175,6 +155,7 @@ const Index = () => {
       loadPermissions();
       loadAdminStatus();
       loadProcesses();
+      loadScenarios();
       setShowChat(false);
       setSelectedScenario(null);
       setSelectedProfile(null);
@@ -219,13 +200,13 @@ const Index = () => {
   };
 
   if (showChat && selectedScenario && selectedProfile) {
-    const scenario = scenarios.find(s => s.id === selectedScenario);
-    const profile = scenario?.profiles.find(p => p.id === selectedProfile);
-    
+    const scenario = scenarios.find((s: any) => s.id === selectedScenario);
+    const profileLabel = selectedProfile;
+
     return (
       <ChatInterface
-        scenario={scenario!.title}
-        customerProfile={profile!.label}
+        scenario={scenario?.title || "Cenário"}
+        customerProfile={profileLabel}
         processId={selectedProcess || undefined}
         onBack={handleBackToMenu}
       />
@@ -566,7 +547,14 @@ const Index = () => {
 
             {/* Scenario Selection */}
             <div className="max-w-4xl mx-auto" id="scenarios-section">
-              <h2 className="text-2xl font-bold text-primary mb-6">Escolha um Cenário</h2>
+              <div className="flex items-center justify-between mb-6">
+                <h2 className="text-2xl font-bold text-primary">Escolha um Cenário</h2>
+                {canManageScenarios && (
+                  <Button variant="outline" onClick={() => navigate("/lab")}>
+                    Laboratório
+                  </Button>
+                )}
+              </div>
               
               <div className="grid md:grid-cols-2 gap-6 mb-8">
                 {scenarios.map((scenario) => (
@@ -584,27 +572,30 @@ const Index = () => {
                   >
                     <CardHeader>
                       <CardTitle className="text-lg">{scenario.title}</CardTitle>
-                      <CardDescription>{scenario.description}</CardDescription>
+                      <CardDescription>{scenario.motivo_label || ""}</CardDescription>
                     </CardHeader>
                     {selectedScenario === scenario.id && (
                       <CardContent>
                         <p className="text-sm font-semibold mb-3 text-primary">Escolha o perfil do cliente:</p>
-                        <div className="space-y-2">
-                          {scenario.profiles.map((profile) => (
-                            <Button
-                              key={profile.id}
-                              variant={selectedProfile === profile.id ? "default" : "outline"}
-                              className="w-full justify-start"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setSelectedProfile(profile.id);
-                              }}
-                            >
-                              <span className="mr-2 text-xl">{profile.emotion}</span>
-                              {profile.label}
-                            </Button>
-                          ))}
-                        </div>
+                        {Array.isArray(scenario.profiles) && scenario.profiles.length > 0 ? (
+                          <div className="space-y-2">
+                            {scenario.profiles.map((label: string) => (
+                              <Button
+                                key={label}
+                                variant={selectedProfile === label ? "default" : "outline"}
+                                className="w-full justify-start"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedProfile(label);
+                                }}
+                              >
+                                {label}
+                              </Button>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-sm text-muted-foreground">Sem perfis definidos.</p>
+                        )}
                       </CardContent>
                     )}
                   </Card>

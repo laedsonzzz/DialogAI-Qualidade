@@ -52,7 +52,7 @@ services:
 
       # Upload constraints
       UPLOAD_MAX_MB: ${UPLOAD_MAX_MB:-10}
-      UPLOAD_ALLOWED_MIME: ${UPLOAD_ALLOWED_MIME:-application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain}
+      UPLOAD_ALLOWED_MIME: ${UPLOAD_ALLOWED_MIME:-application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet}
 
       # Embeddings dimension + Graph RAG flag
       EMBEDDING_DIM: ${EMBEDDING_DIM:-1536}
