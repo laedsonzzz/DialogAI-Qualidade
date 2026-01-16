@@ -688,12 +688,20 @@ const Index = () => {
                             <Button
                               variant="ghost"
                               size="icon"
-                              className="hover:bg-muted"
+                              className="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 hover:text-accent-foreground h-10 w-10 hover:bg-muted"
                             >
-                              <MoreVertical className="w-4 h-4" />
+                              <MoreVertical />
                             </Button>
                           </DropdownMenuTrigger>
                           <DropdownMenuContent align="end">
+                            <DropdownMenuItem
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                navigate(`/cenarios?edit=${encodeURIComponent(scenario.id)}`);
+                              }}
+                            >
+                              Editar informações
+                            </DropdownMenuItem>
                             <DropdownMenuItem
                               className="text-destructive"
                               onClick={(e) => {

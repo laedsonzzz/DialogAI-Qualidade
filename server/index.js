@@ -659,7 +659,7 @@ app.get('/api/conversations/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const r = await pgClient.query(
-      `SELECT id, scenario, customer_profile, process_id, started_at, ended_at, csat_score, user_id
+      `SELECT id, scenario, customer_profile, process_id, started_at, ended_at, csat_score, feedback, user_id
          FROM public.conversations
         WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL`,
       [id, req.clientId]

@@ -9,6 +9,7 @@ import NotFound from "./pages/NotFound";
 import Login from "./pages/Login";
 import ConversationViewer from "./pages/ConversationViewer";
 import Lab from "./pages/Lab";
+import Scenarios from "./pages/Scenarios";
 import { isAuthenticated } from "./lib/auth";
 
 const queryClient = new QueryClient();
@@ -46,6 +47,14 @@ const App = () => (
             element={
               <RequireAuth>
                 <Lab />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/cenarios"
+            element={
+              <RequireAuth>
+                <Scenarios />
               </RequireAuth>
             }
           />
