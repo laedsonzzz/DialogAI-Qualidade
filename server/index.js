@@ -862,6 +862,27 @@ app.delete('/api/knowledge_base/:id', requireCanEditKB(), async (req, res) => {
     }
     const before = prev.rows[0];
 
+    // Bloquear exclusão quando o processo estiver vinculado a um ou mais cenários (qualquer status)
+    const sc = await pgClient.query(
+      `SELECT id, title, motivo_label, status
+         FROM public.scenarios
+        WHERE client_id = $1
+          AND (
+            (metadata->>'process_kb_id') = $2::text
+            OR (metadata->>'processKbId') = $2::text
+          )`,
+      [req.clientId, id]
+    );
+    if (Array.isArray(sc.rows) && sc.rows.length > 0) {
+      return res.status(409).json({
+        error: 'Conhecimento está vinculado a um ou mais cenários',
+        code: 'KB_LINKED_SCENARIOS',
+        count: sc.rows.length,
+        scenarios: sc.rows,
+      });
+    }
+
+    // Bloquear exclusão quando houver conversas referenciando (FK process_id)
     const ref = await pgClient.query(
       'SELECT COUNT(*)::int AS cnt FROM public.conversations WHERE process_id = $1 AND client_id = $2',
       [id, req.clientId]
@@ -870,6 +891,7 @@ app.delete('/api/knowledge_base/:id', requireCanEditKB(), async (req, res) => {
     if (count > 0) {
       return res.status(409).json({ error: 'Processo em uso em conversas', code: 'KB_IN_USE', referencedCount: count });
     }
+
     const r = await pgClient.query('DELETE FROM public.knowledge_base WHERE id = $1 AND client_id = $2', [id, req.clientId]);
     if (r.rowCount === 0) {
       return res.status(404).json({ error: 'Processo não encontrado neste cliente' });

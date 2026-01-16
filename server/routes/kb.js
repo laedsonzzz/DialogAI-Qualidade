@@ -316,6 +316,7 @@ export function kbRoutes(pgClient) {
   /**
    * DELETE /api/kb/sources/:id
    * - Exclui fonte; chunks serão removidos por cascata
+   * - Bloqueia exclusão quando a fonte estiver vinculada a um ou mais cenários (metadata.kb_source_operator_id)
    */
   router.delete('/sources/:id', requireCanEditKB(), async (req, res) => {
     try {
@@ -329,6 +330,26 @@ export function kbRoutes(pgClient) {
         return res.status(404).json({ error: 'Fonte não encontrada neste cliente' });
       }
       const before = prev.rows[0];
+
+      // Bloquear exclusão quando a fonte estiver vinculada a cenários (qualquer status)
+      const sc = await pgClient.query(
+        `SELECT id, title, motivo_label, status
+           FROM public.scenarios
+          WHERE client_id = $1
+            AND (
+              (metadata->>'kb_source_operator_id') = $2::text
+              OR (metadata->>'kbSourceOperatorId') = $2::text
+            )`,
+        [req.clientId, id]
+      );
+      if (Array.isArray(sc.rows) && sc.rows.length > 0) {
+        return res.status(409).json({
+          error: 'Fonte Operador vinculada a um ou mais cenários',
+          code: 'KB_SOURCE_LINKED_SCENARIOS',
+          count: sc.rows.length,
+          scenarios: sc.rows,
+        });
+      }
 
       const del = await pgClient.query(
         `DELETE FROM public.kb_sources WHERE id = $1 AND client_id = $2`,

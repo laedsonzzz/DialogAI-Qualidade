@@ -1083,10 +1083,10 @@ const Lab: React.FC = () => {
 
         {/* Diálogo de resolução de conflito */}
         <AlertDialog open={conflictDialogOpen} onOpenChange={(o) => setConflictDialogOpen(o)}>
-          <AlertDialogContent>
+          <AlertDialogContent className="w-[calc(100vw-2rem)] max-w-[42rem] overflow-x-hidden">
             <AlertDialogHeader>
               <AlertDialogTitle>Conflito ao commitar cenário</AlertDialogTitle>
-              <AlertDialogDescription>
+              <AlertDialogDescription className="break-words">
                 {conflictMessage ||
                   (conflictCode === 'SCENARIO_MOTIVO_CONFLICT'
                     ? 'Já existe um cenário ativo com o mesmo motivo_label e um título diferente. Escolha remover, arquivar ou manter ambos.'
@@ -1095,7 +1095,7 @@ const Lab: React.FC = () => {
             </AlertDialogHeader>
 
             {conflictScenario && (
-              <div className="text-sm text-muted-foreground space-y-1">
+              <div className="text-sm text-muted-foreground space-y-1 break-words">
                 <div><span className="text-foreground">Título:</span> {conflictScenario.title}</div>
                 <div><span className="text-foreground">Motivo:</span> {conflictScenario.motivo_label}</div>
                 <div><span className="text-foreground">Referências em conversas:</span> {conflictReferencedCount}</div>
@@ -1107,8 +1107,7 @@ const Lab: React.FC = () => {
               </div>
             )}
 
-            <AlertDialogFooter>
-              <AlertDialogCancel disabled={!!conflictActionLoading}>Fechar</AlertDialogCancel>
+            <AlertDialogFooter className="flex flex-row flex-wrap justify-end gap-2">
               {conflictCode === 'SCENARIO_MOTIVO_CONFLICT' && (
                 <AlertDialogAction
                   className="bg-primary text-primary-foreground hover:bg-primary/90"
@@ -1132,6 +1131,7 @@ const Lab: React.FC = () => {
               >
                 {conflictActionLoading === 'delete' ? 'Removendo...' : 'Remover cenário antigo'}
               </AlertDialogAction>
+              <AlertDialogCancel disabled={!!conflictActionLoading}>Fechar</AlertDialogCancel>
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
