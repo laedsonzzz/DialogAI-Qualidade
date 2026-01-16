@@ -16,9 +16,10 @@ import {
   AlertDialogAction,
 } from "./ui/alert-dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
-import { Plus, Trash2, Upload, Archive, RotateCcw } from "lucide-react";
+import { Plus, Trash2, Upload, Archive, RotateCcw, Eye } from "lucide-react";
 import { getCommonHeaders, getAuthHeader, getClientId } from "@/lib/auth";
 import { Drawer, DrawerContent, DrawerHeader, DrawerTitle, DrawerDescription, DrawerClose } from "./ui/drawer";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "./ui/dialog";
 import { Switch } from "./ui/switch";
 import GraphViewer from "./GraphViewer";
 
@@ -84,6 +85,15 @@ export const KnowledgeBaseManager = () => {
   const [showGraphDrawer, setShowGraphDrawer] = useState<boolean>(false);
   const [graphSource, setGraphSource] = useState<KbSource | null>(null);
   const [graphPiiMode, setGraphPiiMode] = useState<"default" | "raw">("default");
+
+  // Visualização de conteúdo (Legado)
+  const [viewOpen, setViewOpen] = useState<boolean>(false);
+  const [viewEntry, setViewEntry] = useState<KnowledgeEntry | null>(null);
+  // Visualização de conteúdo (RAG - Operador, free_text)
+  const [ragViewOpen, setRagViewOpen] = useState<boolean>(false);
+  const [ragViewSource, setRagViewSource] = useState<KbSource | null>(null);
+  const [ragViewContent, setRagViewContent] = useState<string>("");
+  const [ragViewLoading, setRagViewLoading] = useState<boolean>(false);
 
   const API_BASE = import.meta.env?.VITE_API_BASE_URL || "";
 
@@ -261,6 +271,29 @@ export const KnowledgeBaseManager = () => {
   function closeGraph() {
     setShowGraphDrawer(false);
     setGraphSource(null);
+  }
+
+  // Visualização de conteúdo para fontes free_text (Operador)
+  async function viewSourceContent(source: KbSource) {
+    setRagViewSource(source);
+    setRagViewOpen(true);
+    setRagViewLoading(true);
+    try {
+      const data = await apiGet<{ content: string }>(`/api/kb/sources/${source.id}/content`);
+      const c = (data as any)?.content;
+      setRagViewContent(typeof c === "string" ? c : JSON.stringify(data));
+    } catch (e: any) {
+      toast({
+        title: "Erro ao visualizar fonte",
+        description: e.message,
+        variant: "destructive",
+      });
+      setRagViewOpen(false);
+      setRagViewSource(null);
+      setRagViewContent("");
+    } finally {
+      setRagViewLoading(false);
+    }
   }
 
   async function uploadDocuments(kbType: "cliente" | "operador") {
@@ -765,6 +798,19 @@ export const KnowledgeBaseManager = () => {
                       )}
                     </div>
                     <div className="flex items-center gap-2">
+                      {/* Visualizar conteúdo para Operador quando for fonte de texto livre */}
+                      {!isCliente && s.source_kind === "free_text" && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => viewSourceContent(s)}
+                          className="text-foreground"
+                        >
+                          <Eye className="w-4 h-4 mr-1" />
+                          Visualizar
+                        </Button>
+                      )}
+
                       <Button
                         variant="outline"
                         size="sm"
@@ -908,9 +954,28 @@ export const KnowledgeBaseManager = () => {
         </DrawerContent>
       </Drawer>
 
+      {/* Dialog: Visualizar conteúdo de fonte (RAG - Operador, free_text) */}
+      <Dialog open={ragViewOpen} onOpenChange={(open) => {
+        setRagViewOpen(open);
+        if (!open) {
+          setRagViewSource(null);
+          setRagViewContent("");
+        }
+      }}>
+        <DialogContent className="max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>{ragViewSource?.title || "Conteúdo da Fonte (Operador)"}</DialogTitle>
+            <DialogDescription>Fonte: texto livre • Contexto: Operador</DialogDescription>
+          </DialogHeader>
+          <div className="mt-2 max-h-[60vh] overflow-auto whitespace-pre-wrap text-sm text-foreground">
+            {ragViewLoading ? "Carregando..." : ragViewContent}
+          </div>
+        </DialogContent>
+      </Dialog>
+
       {/* Separador Visual */}
       <div className="h-px bg-border my-2" />
-
+ 
       {/* Legado: Processos Operacionais */}
       <div className="space-y-4">
         <div className="flex items-center justify-between">
@@ -1023,6 +1088,15 @@ export const KnowledgeBaseManager = () => {
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => { setViewEntry(entry); setViewOpen(true); }}
+                    className="text-foreground"
+                  >
+                    <Eye className="w-4 h-4 mr-1" />
+                    Visualizar
+                  </Button>
                   {canEditKB ? (
                     <>
                       {entry.status === "active" ? (
@@ -1069,6 +1143,22 @@ export const KnowledgeBaseManager = () => {
             </Card>
           )}
         </div>
+
+        {/* Dialog: Visualizar conteúdo do Processo (Legado) */}
+        <Dialog open={viewOpen} onOpenChange={(open) => { setViewOpen(open); if (!open) setViewEntry(null); }}>
+          <DialogContent className="max-w-3xl">
+            <DialogHeader>
+              <DialogTitle>{viewEntry?.title || "Conteúdo do Processo"}</DialogTitle>
+              {viewEntry && (
+                <DialogDescription>Categoria: {viewEntry.category}</DialogDescription>
+              )}
+            </DialogHeader>
+            <div className="mt-2 max-h-[60vh] overflow-auto whitespace-pre-wrap text-sm text-foreground">
+              {viewEntry?.content}
+            </div>
+          </DialogContent>
+        </Dialog>
+
       </div>
     </div>
   );

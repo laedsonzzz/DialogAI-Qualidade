@@ -308,10 +308,11 @@ export function labRoutes(pgClient) {
         return res.status(404).json({ error: 'Execução não encontrada neste cliente' });
       }
 
-      // Normaliza quantidade por motivo (padrão 80, mínimo 1)
-      let maxPerMotivo = parseInt(String(max_per_motivo ?? '80'), 10);
-      if (!Number.isFinite(maxPerMotivo) || maxPerMotivo < 1) {
-        maxPerMotivo = 80;
+      // Quantidade por motivo opcional (quando ausente ou inválida, analisa todos)
+      let maxPerMotivo = null;
+      const parsedLimit = parseInt(String(max_per_motivo ?? ''), 10);
+      if (Number.isFinite(parsedLimit) && parsedLimit > 0) {
+        maxPerMotivo = parsedLimit;
       }
 
       // Marca como running (idempotente)
@@ -330,7 +331,17 @@ export function labRoutes(pgClient) {
         after: { status: 'running', max_per_motivo: maxPerMotivo },
       });
 
-      // Inicia job assíncrono com limite configurável
+      // Se limite foi informado, pré-ajusta denominadores imediatamente para refletir no progresso
+      if (maxPerMotivo) {
+        await pgClient.query(
+          `UPDATE public.lab_progress
+              SET total_ids_distinct = LEAST(total_ids_distinct, $3), updated_at = now()
+            WHERE run_id = $1 AND client_id = $2`,
+          [run_id, req.clientId, maxPerMotivo]
+        );
+      }
+
+      // Inicia job assíncrono com limite configurável (ou todos se não informado)
       await startLabAnalysis(pgClient, { runId: run_id, clientId: req.clientId, maxPerMotivo });
 
       // Retorna 202 Accepted indicando que a análise foi agendada
@@ -496,37 +507,7 @@ export function labRoutes(pgClient) {
 
       await pgClient.query('BEGIN');
 
-      // Upsert em scenarios
-      const metadata = {
-        run_id,
-        motivo,
-        patterns,
-      };
-      const sUp = await pgClient.query(
-        `INSERT INTO public.scenarios (client_id, motivo_label, title, metadata, created_by)
-         VALUES ($1, $2, $3, $4::jsonb, $5)
-         ON CONFLICT (client_id, motivo_label) DO UPDATE
-           SET title = EXCLUDED.title,
-               metadata = EXCLUDED.metadata,
-               updated_at = now()
-         RETURNING id`,
-        [req.clientId, motivo, scenarioTitle, JSON.stringify(metadata), req.user?.id || null]
-      );
-      const scenarioId = sUp.rows[0].id;
-
-      // Perfis
-      for (const p of profiles) {
-        const label = String(p || '').trim();
-        if (!label) continue;
-        await pgClient.query(
-          `INSERT INTO public.scenario_profiles (scenario_id, profile_label)
-           VALUES ($1, $2)
-           ON CONFLICT (scenario_id, profile_label) DO NOTHING`,
-          [scenarioId, label]
-        );
-      }
-
-      // Knowledge Base (processo) - opcional
+      // Knowledge Base (processo) - opcional (criar antes para incluir ID no metadata do cenário)
       let processKbId = null;
       if (processText && processText.trim().length > 0) {
         const title = `Processo - ${scenarioTitle}`;
@@ -540,7 +521,7 @@ export function labRoutes(pgClient) {
         processKbId = rKB.rows[0].id;
       }
 
-      // KB Operador (RAG) com operator_guidelines - opcional
+      // KB Operador (RAG) com operator_guidelines - opcional (criar antes para incluir ID no metadata do cenário)
       let kbSourceOperatorId = null;
       if (operatorGuidelines.length > 0) {
         // Texto consolidado
@@ -572,6 +553,40 @@ export function labRoutes(pgClient) {
             [kbSourceOperatorId, req.clientId, 'operador', i + 1, chunks[i].content, chunks[i].tokens || null, vecLit]
           );
         }
+      }
+
+      // Monta metadata já com os IDs criados (quando existirem)
+      const metadata = {
+        run_id,
+        motivo,
+        patterns,
+        process_kb_id: processKbId,
+        kb_source_operator_id: kbSourceOperatorId,
+      };
+
+      // Upsert em scenarios com metadata completo
+      const sUp = await pgClient.query(
+        `INSERT INTO public.scenarios (client_id, motivo_label, title, metadata, created_by)
+         VALUES ($1, $2, $3, $4::jsonb, $5)
+         ON CONFLICT (client_id, motivo_label) DO UPDATE
+           SET title = EXCLUDED.title,
+               metadata = EXCLUDED.metadata,
+               updated_at = now()
+         RETURNING id`,
+        [req.clientId, motivo, scenarioTitle, JSON.stringify(metadata), req.user?.id || null]
+      );
+      const scenarioId = sUp.rows[0].id;
+
+      // Perfis
+      for (const p of profiles) {
+        const label = String(p || '').trim();
+        if (!label) continue;
+        await pgClient.query(
+          `INSERT INTO public.scenario_profiles (scenario_id, profile_label)
+           VALUES ($1, $2)
+           ON CONFLICT (scenario_id, profile_label) DO NOTHING`,
+          [scenarioId, label]
+        );
       }
 
       // Auditoria

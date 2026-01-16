@@ -12,7 +12,7 @@ function getJwtSecret() {
 }
 
 /**
- * Util: cria access token curto (15m)
+ * Util: cria access token de longa duração (24h)
  */
 async function createAccessToken(user) {
   const now = Math.floor(Date.now() / 1000);
@@ -23,7 +23,7 @@ async function createAccessToken(user) {
   })
     .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
     .setIssuedAt(now)
-    .setExpirationTime(now + 60 * 15) // 15 minutos
+    .setExpirationTime(now + 60 * 60 * 24) // 24 horas
     .sign(getJwtSecret());
 }
 

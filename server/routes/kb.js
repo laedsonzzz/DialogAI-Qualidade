@@ -218,6 +218,57 @@ export function kbRoutes(pgClient) {
   });
 
   /**
+   * GET /api/kb/sources/:id/content
+   * - Visualiza conteúdo agregado de uma fonte de texto livre (free_text)
+   * - Concatena os conteúdos de kb_chunks em ordem de chunk_no
+   * - Qualquer usuário autenticado no cliente pode visualizar (prefixo já aplica requireAuth+requireTenant)
+   */
+  router.get('/sources/:id/content', async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      // Carregar fonte do cliente
+      const prev = await pgClient.query(
+        `SELECT id, kb_type, source_kind, title, status
+           FROM public.kb_sources
+          WHERE id = $1 AND client_id = $2`,
+        [id, req.clientId]
+      );
+      if (prev.rows.length === 0) {
+        return res.status(404).json({ error: 'Fonte não encontrada neste cliente' });
+      }
+      const source = prev.rows[0];
+
+      if (String(source.source_kind) !== 'free_text') {
+        return res.status(400).json({ error: 'Visualização disponível apenas para fontes de texto livre (free_text)', code: 'ONLY_FREE_TEXT' });
+      }
+
+      // Agregar conteúdo por chunks (em ordem)
+      const cr = await pgClient.query(
+        `SELECT chunk_no, content
+           FROM public.kb_chunks
+          WHERE source_id = $1 AND client_id = $2
+          ORDER BY chunk_no ASC`,
+        [id, req.clientId]
+      );
+      const parts = (cr.rows || []).map((r) => (typeof r.content === 'string' ? r.content : ''));
+
+      return res.json({
+        id: source.id,
+        kb_type: source.kb_type,
+        source_kind: source.source_kind,
+        title: source.title,
+        status: source.status,
+        chunks: cr.rows.length,
+        content: parts.join('\n\n'),
+      });
+    } catch (err) {
+      console.error('KB source content view error:', err);
+      return res.status(500).json({ error: 'Erro ao visualizar conteúdo da fonte' });
+    }
+  });
+
+  /**
    * PATCH /api/kb/sources/:id
    * Body: { status: 'active'|'archived' }
    */

@@ -1,5 +1,6 @@
 import express from 'express';
 import { writeAudit } from '../middleware/audit.js';
+import { requireCanManageScenarios } from '../middleware/permissions.js';
 
 /**
  * Rotas de Cenários aprovados (principais) por cliente.
@@ -93,6 +94,124 @@ export function scenariosRoutes(pgClient) {
     } catch (err) {
       console.error('Update scenario status error:', err);
       return res.status(500).json({ error: 'Erro ao atualizar status do cenário' });
+    }
+  });
+
+  /**
+   * DELETE /api/scenarios/:id
+   * Remove completamente um cenário do cliente e recursos vinculados no metadata:
+   * - Remove scenario_profiles
+   * - Remove knowledge_base (process_kb_id), se existir e pertencer ao cliente
+   * - Remove kb_chunks e kb_sources (kb_source_operator_id), se existir e pertencer ao cliente
+   * - Remove o próprio cenário
+   */
+  router.delete('/:id', requireCanManageScenarios(), async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      // Buscar cenário do cliente
+      const prev = await pgClient.query(
+        `SELECT id, client_id, motivo_label, title, status, metadata
+           FROM public.scenarios
+          WHERE id = $1 AND client_id = $2`,
+        [id, req.clientId]
+      );
+      if (prev.rows.length === 0) {
+        return res.status(404).json({ error: 'Cenário não encontrado neste cliente' });
+      }
+      const scenario = prev.rows[0];
+
+      // Verificar referências em conversas (inclui conversas soft-deletadas)
+      const ref = await pgClient.query(
+        `SELECT COUNT(*)::int AS cnt
+           FROM public.conversations
+          WHERE client_id = $1 AND scenario_id = $2`,
+        [req.clientId, id]
+      );
+      if ((ref.rows[0]?.cnt ?? 0) > 0) {
+        return res.status(409).json({
+          error: 'Cenário em uso em conversas. Arquive para ocultar sem remover histórico.',
+          code: 'SCENARIO_IN_USE',
+          referencedCount: ref.rows[0].cnt
+        });
+      }
+      
+      // Inicia transação
+      await pgClient.query('BEGIN');
+      
+      // Remove perfis vinculados ao cenário
+      await pgClient.query(
+        `DELETE FROM public.scenario_profiles
+          WHERE scenario_id = $1`,
+        [id]
+      );
+
+      // Remover recursos vinculados do metadata, quando presentes e pertencentes ao cliente
+      let referencedCount = 0;
+      try {
+        const meta = scenario.metadata || {};
+        const processKbId = meta?.process_kb_id || meta?.processKbId || null;
+        const kbSourceOperatorId = meta?.kb_source_operator_id || meta?.kbSourceOperatorId || null;
+
+        if (processKbId) {
+          const delKB = await pgClient.query(
+            `DELETE FROM public.knowledge_base
+               WHERE id = $1 AND client_id = $2`,
+            [processKbId, req.clientId]
+          );
+          referencedCount += delKB.rowCount || 0;
+        }
+
+        if (kbSourceOperatorId) {
+          // Apagar chunks primeiro
+          const delChunks = await pgClient.query(
+            `DELETE FROM public.kb_chunks
+               WHERE source_id = $1 AND client_id = $2`,
+            [kbSourceOperatorId, req.clientId]
+          );
+          referencedCount += delChunks.rowCount || 0;
+
+          // Apagar source
+          const delSrc = await pgClient.query(
+            `DELETE FROM public.kb_sources
+               WHERE id = $1 AND client_id = $2`,
+            [kbSourceOperatorId, req.clientId]
+          );
+          referencedCount += delSrc.rowCount || 0;
+        }
+      } catch (refErr) {
+        // não bloqueia, apenas registra e continua
+        console.warn('Erro ao remover recursos vinculados ao cenário:', refErr);
+      }
+
+      // Remove o próprio cenário
+      const delScenario = await pgClient.query(
+        `DELETE FROM public.scenarios
+           WHERE id = $1 AND client_id = $2`,
+        [id, req.clientId]
+      );
+      if (delScenario.rowCount === 0) {
+        await pgClient.query('ROLLBACK');
+        return res.status(404).json({ error: 'Cenário não encontrado neste cliente' });
+      }
+
+      // Auditoria
+      await writeAudit(pgClient, req, {
+        entityType: 'scenarios',
+        entityId: id,
+        action: 'delete',
+        before: scenario,
+        after: null,
+        extra: { referencedCount },
+      });
+
+      await pgClient.query('COMMIT');
+
+      return res.json({ ok: true, referencedCount });
+    } catch (err) {
+      await pgClient.query('ROLLBACK');
+      console.error('Delete scenario error:', err);
+      return res.status(500).json({ error: 'Erro ao remover cenário' });
     }
   });
 

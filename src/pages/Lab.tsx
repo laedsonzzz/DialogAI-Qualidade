@@ -76,7 +76,7 @@ const Lab: React.FC = () => {
   const [committed, setCommitted] = useState<Set<string>>(new Set());
   const [authChecked, setAuthChecked] = useState(false);
   const [canManage, setCanManage] = useState(false);
-  const [maxPerMotivo, setMaxPerMotivo] = useState<number>(80);
+  const [maxPerMotivo, setMaxPerMotivo] = useState<string>("");
 
   // Preview/mapeamento de colunas
   const requiredCanonicals = useMemo(() => ([
@@ -326,10 +326,18 @@ const Lab: React.FC = () => {
       return;
     }
     try {
+      const payload: any = {};
+      const trimmed = (maxPerMotivo || "").trim();
+      if (trimmed) {
+        const num = parseInt(trimmed, 10);
+        if (Number.isFinite(num) && num > 0) {
+          payload.max_per_motivo = num;
+        }
+      }
       const res = await fetch(`${API_BASE}/api/lab/scenarios/analyze/${encodeURIComponent(runId)}`, {
         method: "POST",
         headers: getCommonHeaders(),
-        body: JSON.stringify({ max_per_motivo: maxPerMotivo }),
+        body: JSON.stringify(payload),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -408,12 +416,23 @@ const Lab: React.FC = () => {
     }
   }
 
+  // Exibição de "atendimentos amostrados" sem somar motivos diferentes:
+  // - Se houver exatamente 1 motivo, o topo mostra o progresso desse motivo (processed/total).
+  // - Caso contrário, não soma motivos distintos no topo.
+  const singleMotivo = useMemo(() => {
+    const list = progress?.motivos || [];
+    return list.length === 1 ? list[0] : null;
+  }, [progress?.motivos]);
+
   const overallPct = useMemo(() => {
-    const tot = progress?.overall?.totalDistinctIds || uploadTotals?.totalDistinctIds || 0;
-    const proc = progress?.overall?.processedDistinctIds || 0;
-    if (tot <= 0) return 0;
-    return Math.min(100, Math.round((proc / tot) * 100));
-  }, [progress?.overall, uploadTotals?.totalDistinctIds]);
+    if (singleMotivo) {
+      const tot = Number(singleMotivo.total_ids_distinct || 0);
+      const proc = Number(singleMotivo.processed_ids_distinct || 0);
+      if (tot <= 0) return 0;
+      return Math.min(100, Math.round((proc / tot) * 100));
+    }
+    return 0;
+  }, [singleMotivo]);
 
   const hasCachedMotivos = useMemo(() => {
     return (progress?.motivos || []).some((m) => m.cached);
@@ -514,9 +533,11 @@ const Lab: React.FC = () => {
           {warnings.length > 0 && (
             <div className="mt-3">
               <p className="text-sm text-muted-foreground">Avisos:</p>
-              <ul className="text-sm list-disc list-inside">
-                {warnings.map((w, i) => <li key={i}>{w}</li>)}
-              </ul>
+              <div className="max-h-48 overflow-y-auto rounded-md border bg-background/50 p-2">
+                <ul className="text-sm list-disc list-inside pr-2">
+                  {warnings.map((w, i) => <li key={i}>{w}</li>)}
+                </ul>
+              </div>
             </div>
           )}
           {uploadTotals && (
@@ -535,14 +556,13 @@ const Lab: React.FC = () => {
                 <Input
                   id="max-per-motivo"
                   type="number"
-                  min={1}
-                  step={1}
+                  placeholder="Opcional..."
                   value={maxPerMotivo}
                   onChange={(e) => {
-                    const v = parseInt(e.target.value || "0", 10);
-                    setMaxPerMotivo(Number.isFinite(v) && v > 0 ? v : 80);
+                    // permite vazio; quando preenchido, deve ser inteiro positivo
+                    setMaxPerMotivo(e.target.value);
                   }}
-                  className="w-24 h-8 text-sm"
+                  className="w-28 h-8 text-sm"
                 />
               </div>
               <Button variant="outline" onClick={async () => { await loadResults(); }} disabled={!runId}>Carregar Resultados</Button>
@@ -552,9 +572,15 @@ const Lab: React.FC = () => {
 
           <div className="mt-4">
             <div className="flex items-center justify-between mb-2">
-              <span className="text-sm">Progresso geral</span>
+              <span className="text-sm">Atendimentos amostrados</span>
               <span className="text-xs text-muted-foreground">
-                {progress?.overall?.processedDistinctIds || 0} / {progress?.overall?.totalDistinctIds || uploadTotals?.totalDistinctIds || 0}
+                {singleMotivo ? (
+                  <>
+                    {singleMotivo.processed_ids_distinct} / {singleMotivo.total_ids_distinct}
+                  </>
+                ) : (
+                  <>—</>
+                )}
               </span>
             </div>
             <Progress value={overallPct} />

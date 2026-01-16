@@ -265,11 +265,21 @@ export async function startLabAnalysis(pgClient, { runId, clientId, maxPerMotivo
         const allIds = idsRes.rows.map((r) => r.atendimento_id);
 
         // Amostra controlada para enviar ao LLM
-        const limit = Math.max(1, Number(maxPerMotivo ?? LAB_MAX_SAMPLE_ATT ?? 80));
+        // Limite opcional: quando ausente/indefinido, analisar todos os atendimentos do motivo
+        const limit = (Number.isFinite(Number(maxPerMotivo)) && Number(maxPerMotivo) > 0) ? Number(maxPerMotivo) : allIds.length;
         const sampleIds = allIds.slice(0, limit);
         const samples = [];
 
-        for (const atendimentoId of allIds) {
+        const displayTotal = sampleIds.length;
+        // Ajusta denominador exibido no progresso para refletir o limite selecionado
+        await pgClient.query(
+          `UPDATE public.lab_progress
+              SET total_ids_distinct = LEAST(total_ids_distinct, $3), updated_at = now()
+            WHERE run_id = $1 AND motivo = $2`,
+          [runId, motivo, displayTotal]
+        );
+
+        for (const atendimentoId of sampleIds) {
           try {
             const msgs = await pgClient.query(
               `SELECT seq, role_norm, message_text
@@ -278,21 +288,20 @@ export async function startLabAnalysis(pgClient, { runId, clientId, maxPerMotivo
                 ORDER BY seq ASC`,
               [runId, clientId, motivo, atendimentoId]
             );
-            if (sampleIds.includes(atendimentoId)) {
-              const transcript = msgs.rows.map((m) => ({
-                role: m.role_norm, // 'operator' | 'bot' | 'customer'
-                text: m.message_text,
-              }));
-              samples.push({ atendimento_id: atendimentoId, transcript });
-            }
 
-            // Marca progresso (contagem por IdAtendimento distinto)
+            const transcript = msgs.rows.map((m) => ({
+              role: m.role_norm, // 'operator' | 'bot' | 'customer'
+              text: m.message_text,
+            }));
+            samples.push({ atendimento_id: atendimentoId, transcript });
+
+            // Marca progresso (contagem por IdAtendimento distinto) limitado ao displayTotal
             processed += 1;
             await pgClient.query(
               `UPDATE public.lab_progress
                   SET processed_ids_distinct = $3, updated_at = now()
                 WHERE run_id = $1 AND motivo = $2`,
-              [runId, motivo, Math.min(processed, total)]
+              [runId, motivo, Math.min(processed, displayTotal)]
             );
           } catch (perAttErr) {
             // Loga erro por atendimento e continua
@@ -345,9 +354,9 @@ export async function startLabAnalysis(pgClient, { runId, clientId, maxPerMotivo
             ]
           );
 
-          // Se motivo 100% processado, grava cache
-          const finalProcessed = Math.min(processed, total);
-          if (finalProcessed >= total && total > 0) {
+          // Se motivo 100% processado (dentro do limite selecionado), grava cache
+          const finalProcessed = Math.min(processed, displayTotal);
+          if (finalProcessed >= displayTotal && displayTotal > 0) {
             const summary = {
               scenario_title,
               customer_profiles,
