@@ -16,7 +16,7 @@ import knowledgeIllustration from "@/assets/knowledge-illustration.jpg";
 import ClientSwitcher from "@/components/ClientSwitcher";
 import ProfileMenu from "@/components/ProfileMenu";
 import { useNavigate } from "react-router-dom";
-import { getAuthHeader, clearTokens, getClientId } from "@/lib/auth";
+import { getAuthHeader, clearTokens, getClientId, setClientId } from "@/lib/auth";
 import { getCommonHeaders } from "@/lib/auth";
 
 interface KnowledgeEntry {
@@ -73,7 +73,19 @@ const Index = () => {
         return;
       }
       const data = await res.json();
-      const cid = getClientId();
+      let cid = getClientId();
+
+      // Auto-seleciona o primeiro cliente disponível caso nenhum esteja selecionado
+      if (!cid && Array.isArray(data.clients) && data.clients.length > 0) {
+        cid = data.clients[0].client_id;
+        setClientId(cid);
+        // Notifica toda a aplicação sobre a troca de cliente para recarregar dados dependentes
+        try {
+          const ev = new Event("client:changed");
+          window.dispatchEvent(ev);
+        } catch {}
+      }
+
       const found = (data.clients || []).find((c: any) => c.client_id === cid);
       setCanStartChat(Boolean(found?.permissions?.can_start_chat));
       setCanManageScenarios(Boolean(found?.permissions?.can_manage_scenarios));

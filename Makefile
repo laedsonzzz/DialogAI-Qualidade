@@ -28,6 +28,9 @@ migrations:
 	docker exec -i dialogai_postgres psql -U dialogai -d dialogai -f /docker-entrypoint-initdb.d/009_enable_pgvector.sql
 	docker exec -i dialogai_postgres psql -U dialogai -d dialogai -f /docker-entrypoint-initdb.d/010_rag_kb_schema.sql
 	docker exec -i dialogai_postgres psql -U dialogai -d dialogai -f /docker-entrypoint-initdb.d/011_graph_rag_schema.sql
+	docker exec -i dialogai_postgres psql -U dialogai -d dialogai -f /docker-entrypoint-initdb.d/012_lab_schema.sql
+	docker exec -i dialogai_postgres psql -U dialogai -d dialogai -f /docker-entrypoint-initdb.d/013_rbac_manage_scenarios.sql
+	docker exec -i dialogai_postgres psql -U dialogai -d dialogai -f /docker-entrypoint-initdb.d/014_scenarios_schema.sql
 
 
 # Fluxo completo (git pull + down + up --build)
