@@ -112,8 +112,14 @@ A API do backend está implementada em [server/index.js](server/index.js:1) e as
     - Body: { transcript: Message[], scenario, customerProfile, conversationId? }
     - Integra Azure Responses API para avaliação (JSON); se conversationId for informado, atualiza ended_at, csat_score, feedback (escopo por client_id)
     - Resposta: JSON da avaliação
+  - GET /api/conversations
+    - Lista conversas conforme escopo RBAC (team|client) e cliente atual
+  - GET /api/conversations/:id
+    - Retorna metadados da conversa incluindo { csat_score, feedback } para exibição de avaliação
+  - GET /api/conversations/:id/messages
+    - Retorna mensagens persistidas (apenas após a conversa estar finalizada — ended_at não nulo)
 
-- Base de Conhecimento (protegido; requer RBAC por cliente)
+- Base de Conhecimento (Legado, protegido; requer RBAC por cliente)
   - GET /api/knowledge_base?status=active|archived|all
     - Filtra por client_id automaticamente (X-Client-Id)
   - POST /api/knowledge_base
@@ -127,6 +133,49 @@ A API do backend está implementada em [server/index.js](server/index.js:1) e as
   - DELETE /api/knowledge_base/:id
     - Permissão: can_edit_kb
     - Remove entrada por id no escopo do cliente; se houver conversas referenciando (FK process_id e mesmo client_id), retorna 409 { code: "KB_IN_USE", referencedCount }
+
+- Base de Conhecimento (RAG por contexto — Cliente/Operador) [server/routes/kb.js](server/routes/kb.js:1)
+  - GET /api/kb/sources?kb_type=cliente|operador&status=active|archived|all
+    - Lista fontes por contexto e status
+  - POST /api/kb/sources/upload (multipart: files[])
+    - Permissão: can_edit_kb
+    - Extrai, normaliza, anonimiza PII (modo default) e gera embeddings/chunks automaticamente
+  - POST /api/kb/sources/text
+    - Permissão: can_edit_kb
+    - Cria fonte de texto livre com chunking + embeddings
+  - GET /api/kb/sources/:id/content
+    - Visualiza conteúdo agregado (apenas para fontes free_text)
+  - PATCH /api/kb/sources/:id
+    - Permissão: can_edit_kb
+    - Body: { status: "archived" | "active" }
+    - Atualiza status da fonte (arquivamento/reativação)
+  - DELETE /api/kb/sources/:id
+    - Permissão: can_edit_kb
+    - Remove fonte e seus chunks
+  - POST /api/kb/search
+    - Busca vetorial (cosine) em kb_chunks por client_id e kb_type
+  - Grafos de conhecimento por fonte
+    - POST /api/kb/graph/extract (montado em /api/kb/graph)
+    - Extração e visualização via [src/components/GraphViewer.tsx](src/components/GraphViewer.tsx:1)
+
+- Cenários (gestão e versionamento) [server/routes/scenarios.js](server/routes/scenarios.js:1)
+  - GET /api/scenarios?status=active|archived|all
+    - Lista cenários aprovados do cliente com perfis agregados
+  - GET /api/scenarios/:id/details
+    - Retorna payload para edição (UI do Lab): { title, motivo_label, profiles[], process_text, operator_guidelines[], patterns[] }
+  - POST /api/scenarios/:id/fork
+    - Permissão: can_manage_scenarios
+    - Arquiva o cenário anterior e o renomeia com sufixo "vN" (ex.: "Motivo v2"), mantendo o novo como ativo com o rótulo base
+    - Cria novos recursos a partir do formulário:
+      - knowledge_base (category "processo") com process_text
+      - kb_sources (kb_type "operador") + kb_chunks com embeddings para operator_guidelines
+    - Arquiva recursos anteriores do cenário (quando existirem):
+      - knowledge_base (process_kb_id) anterior
+      - kb_sources (kb_source_operator_id) anterior
+  - PATCH /api/scenarios/:id
+    - Atualiza status (active|archived)
+  - DELETE /api/scenarios/:id
+    - Remove cenário e recursos vinculados quando não houver conversas referenciando; caso contrário, usar arquivamento
 
 6. Integração com Azure OpenAI
 - A chamada para Azure Responses é feita via [fetchWithProxy()](server/index.js) usando undici [ProxyAgent](server/index.js) quando HTTP(S) proxy está configurado; caso contrário, utiliza [fetch()](server/index.js). Os headers incluem ["api-key"](server/index.js).
@@ -162,8 +211,21 @@ A API do backend está implementada em [server/index.js](server/index.js:1) e as
     - Usa API_BASE = import.meta.env.VITE_API_BASE_URL
     - POST /api/conversations, POST /api/chat, POST /api/evaluate
   - [src/components/KnowledgeBaseManager.tsx](src/components/KnowledgeBaseManager.tsx:1)
-    - GET/POST/PATCH/DELETE /api/knowledge_base
-    - Filtro de status (Ativos/Arquivados/Todos), ações de Arquivar/Reativar, e tratamento de erro 409 (processo em uso) com diálogo de arquivamento
+    - GET/POST/PATCH/DELETE /api/knowledge_base (Legado)
+    - RAG por contexto (/api/kb): upload de documentos, criação de fonte texto livre, listar/arquivar/reativar/excluir fontes, busca vetorial e visualização de conteúdo para fontes free_text (Operador)
+    - Visualização de grafo por fonte com extração on-demand (drawer) via [src/components/GraphViewer.tsx](src/components/GraphViewer.tsx:1)
+  - [src/pages/Scenarios.tsx](src/pages/Scenarios.tsx:1)
+    - Listagem de cenários ativos; menu de três pontinhos por cenário com ação "Editar informações"
+    - Modal de edição (UI igual ao Lab) com barra de rolagem, limites de itens e atalhos de adicionar/remover
+    - Carrega detalhes via GET /api/scenarios/:id/details; ao salvar, chama POST /api/scenarios/:id/fork (arquiva versão anterior, mantém rótulo do mais atual)
+    - Suporte a deep link (?edit=:id) e botão "Voltar" para a tela inicial
+    - RBAC: exige can_manage_scenarios (validação via /api/auth/me)
+  - [src/pages/Index.tsx](src/pages/Index.tsx:1)
+    - Cards de cenários com menu de três pontinhos; ação "Editar informações" direciona para /cenarios?edit=:id
+    - Suporte a arquivamento quando remoção do cenário é bloqueada por conversas (409 SCENARIO_IN_USE)
+  - [src/pages/ConversationViewer.tsx](src/pages/ConversationViewer.tsx:1)
+    - Visualiza metadados e mensagens da conversa (mensagens apenas após finalização)
+    - Botão superior direito "Ver avaliação" quando há feedback; abre Dialog exibindo CSAT e detalhes da avaliação
 
 8. Remoção de Supabase
 - Removidos:

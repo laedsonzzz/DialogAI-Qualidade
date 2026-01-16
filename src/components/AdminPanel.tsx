@@ -37,6 +37,7 @@ type UserClient = {
   can_edit_kb: boolean;
   can_view_team_chats: boolean;
   can_view_all_client_chats: boolean;
+  can_manage_scenarios: boolean;
   email?: string;
   full_name?: string;
   client_name?: string;
@@ -167,7 +168,7 @@ const AdminPanel: React.FC = () => {
   const [filtersClientIds, setFiltersClientIds] = useState<Set<string>>(new Set());
   const [filtersTipos, setFiltersTipos] = useState<Set<"interno" | "externo">>(new Set());
   const [filtersPerms, setFiltersPerms] = useState<
-    Set<"can_start_chat" | "can_edit_kb" | "can_view_team_chats" | "can_view_all_client_chats">
+    Set<"can_start_chat" | "can_edit_kb" | "can_view_team_chats" | "can_view_all_client_chats" | "can_manage_scenarios">
   >(new Set());
   const [filtersOpen, setFiltersOpen] = useState(false);
   // Permissions editor state (right panel)
@@ -178,6 +179,7 @@ const AdminPanel: React.FC = () => {
   const [canEditKB, setCanEditKB] = useState(false);
   const [canViewTeam, setCanViewTeam] = useState(false);
   const [canViewAll, setCanViewAll] = useState(false);
+  const [canManageLab, setCanManageLab] = useState(false);
 
   // Links per selected user (for right panel)
   const [userLinks, setUserLinks] = useState<UserClient[]>([]);
@@ -208,6 +210,7 @@ const AdminPanel: React.FC = () => {
       setCanEditKB(false);
       setCanViewTeam(false);
       setCanViewAll(false);
+      setCanManageLab(false);
       return;
     }
     // Se nenhum cliente estiver selecionado, assume o primeiro vínculo
@@ -232,12 +235,14 @@ const AdminPanel: React.FC = () => {
       setCanEditKB(!!link.can_edit_kb);
       setCanViewTeam(!!link.can_view_team_chats);
       setCanViewAll(!!link.can_view_all_client_chats);
+      setCanManageLab(!!link.can_manage_scenarios);
     } else {
       setTipoUsuario("interno");
       setCanStartChat(false);
       setCanEditKB(false);
       setCanViewTeam(false);
       setCanViewAll(false);
+      setCanManageLab(false);
     }
   }, [selectedClientId, userLinks]);
 
@@ -408,6 +413,7 @@ const AdminPanel: React.FC = () => {
     setCanEditKB(!!link.can_edit_kb);
     setCanViewTeam(!!link.can_view_team_chats);
     setCanViewAll(!!link.can_view_all_client_chats);
+    setCanManageLab(!!link.can_manage_scenarios);
   }
 
   async function handleUpsertUserClient() {
@@ -424,6 +430,7 @@ const AdminPanel: React.FC = () => {
         can_edit_kb: canEditKB,
         can_view_team_chats: canViewTeam,
         can_view_all_client_chats: canViewAll,
+        can_manage_scenarios: canManageLab,
       });
       loadUserLinks(selectedUserId);
       loadAllUserClients(); // sync filters source
@@ -523,7 +530,8 @@ const AdminPanel: React.FC = () => {
             (filtersPerms.has("can_start_chat") && l.can_start_chat) ||
             (filtersPerms.has("can_edit_kb") && l.can_edit_kb) ||
             (filtersPerms.has("can_view_team_chats") && l.can_view_team_chats) ||
-            (filtersPerms.has("can_view_all_client_chats") && l.can_view_all_client_chats)
+            (filtersPerms.has("can_view_all_client_chats") && l.can_view_all_client_chats) ||
+            (filtersPerms.has("can_manage_scenarios") && l.can_manage_scenarios)
         );
         if (!hasPerm) return false;
       }
@@ -790,6 +798,14 @@ const AdminPanel: React.FC = () => {
                           />
                           <Label htmlFor="flt-perm-all" className="text-sm cursor-pointer">Pode ver todos os chats do cliente</Label>
                         </div>
+                        <div className="flex items-center gap-2">
+                          <Checkbox
+                            checked={filtersPerms.has("can_manage_scenarios")}
+                            onCheckedChange={() => toggleSet(setFiltersPerms, filtersPerms, "can_manage_scenarios")}
+                            id="flt-perm-lab"
+                          />
+                          <Label htmlFor="flt-perm-lab" className="text-sm cursor-pointer">Pode gerenciar cenários</Label>
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -820,6 +836,7 @@ const AdminPanel: React.FC = () => {
                           setCanEditKB(!!l.can_edit_kb);
                           setCanViewTeam(!!l.can_view_team_chats);
                           setCanViewAll(!!l.can_view_all_client_chats);
+                          setCanManageLab(!!l.can_manage_scenarios);
                         } else {
                           // Sem vínculos: define padrão claro
                           setSelectedClientId("");
@@ -893,6 +910,7 @@ const AdminPanel: React.FC = () => {
                       <PermToggle label="Pode editar base de conhecimento" checked={canEditKB} onChange={setCanEditKB} />
                       <PermToggle label="Pode ver chats da equipe" checked={canViewTeam} onChange={setCanViewTeam} />
                       <PermToggle label="Pode ver todos os chats do cliente" checked={canViewAll} onChange={setCanViewAll} />
+                      <PermToggle label="Pode gerenciar cenários" checked={canManageLab} onChange={setCanManageLab} />
                     </div>
 
                     <div className="flex gap-2 mt-2">
@@ -922,7 +940,7 @@ const AdminPanel: React.FC = () => {
                               {l.client_code ? `(${l.client_code})` : ""}
                             </div>
                             <div className="text-muted-foreground">
-                              tipo: {l.tipo_usuario} • start:{String(l.can_start_chat)} • kb:{String(l.can_edit_kb)} •
+                              tipo: {l.tipo_usuario} • start:{String(l.can_start_chat)} • kb:{String(l.can_edit_kb)} • lab:{String(l.can_manage_scenarios)} •
                               team:{String(l.can_view_team_chats)} • all:{String(l.can_view_all_client_chats)}
                             </div>
                           </div>

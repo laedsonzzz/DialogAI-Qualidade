@@ -4,6 +4,7 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { getCommonHeaders, getAuthHeader } from "@/lib/auth";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 type ConversationMeta = {
   id: string;
@@ -13,6 +14,7 @@ type ConversationMeta = {
   started_at?: string | null;
   ended_at?: string | null;
   csat_score?: number | null;
+  feedback?: any | null;
   user_id?: string;
 };
 
@@ -59,6 +61,7 @@ const ConversationViewer: React.FC = () => {
   const [errorMsgs, setErrorMsgs] = useState<string | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [showEval, setShowEval] = useState(false);
 
   async function loadIsAdmin() {
     try {
@@ -170,11 +173,18 @@ const ConversationViewer: React.FC = () => {
           <Button variant="ghost" onClick={() => navigate(-1)}>
             Voltar
           </Button>
-          {isAdmin && meta && (
-            <Button variant="destructive" onClick={handleDelete} disabled={deleting}>
-              {deleting ? "Excluindo..." : "Excluir conversa"}
-            </Button>
-          )}
+          <div className="flex items-center gap-2">
+            {meta?.feedback && (
+              <Button variant="outline" onClick={() => setShowEval(true)}>
+                Ver avaliação
+              </Button>
+            )}
+            {isAdmin && meta && (
+              <Button variant="destructive" onClick={handleDelete} disabled={deleting}>
+                {deleting ? "Excluindo..." : "Excluir conversa"}
+              </Button>
+            )}
+          </div>
         </div>
 
         <Card className="p-4">
@@ -229,6 +239,53 @@ const ConversationViewer: React.FC = () => {
             </>
           )}
         </Card>
+        {/* Avaliação (Dialog Inline) */}
+        <Dialog open={showEval} onOpenChange={setShowEval}>
+          <DialogContent className="sm:max-w-3xl">
+            <DialogHeader>
+              <DialogTitle>Avaliação da Conversa</DialogTitle>
+            </DialogHeader>
+            {meta?.feedback ? (
+              <div className="space-y-4">
+                {/* CSAT */}
+                <div className="flex items-center gap-2">
+                  <Badge variant="secondary">CSAT: {meta.feedback.csat ?? "-"}</Badge>
+                  <span className="text-sm text-muted-foreground">
+                    {typeof meta.feedback?.resumo === "string" ? meta.feedback.resumo : ""}
+                  </span>
+                </div>
+
+                {/* Pontos positivos */}
+                {Array.isArray(meta.feedback?.pontos_positivos) && meta.feedback.pontos_positivos.length > 0 && (
+                  <div className="space-y-2">
+                    <div className="font-medium">Pontos Positivos</div>
+                    <ul className="list-disc list-inside text-sm text-muted-foreground">
+                      {meta.feedback.pontos_positivos.map((p: string, i: number) => <li key={`pp-${i}`}>{p}</li>)}
+                    </ul>
+                  </div>
+                )}
+
+                {/* Oportunidades */}
+                {Array.isArray(meta.feedback?.oportunidades) && meta.feedback.oportunidades.length > 0 && (
+                  <div className="space-y-2">
+                    <div className="font-medium">Oportunidades de Melhoria</div>
+                    <div className="grid gap-2">
+                      {meta.feedback.oportunidades.map((o: any, i: number) => (
+                        <Card key={`opp-${i}`} className="p-3">
+                          <div className="text-sm font-semibold">{o.area}</div>
+                          <div className="text-xs text-muted-foreground mt-1">Trecho: "{o.trecho_original}"</div>
+                          <div className="text-xs mt-1">Sugestão: "{o.sugestao}"</div>
+                        </Card>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="text-sm text-muted-foreground">Sem avaliação disponível para esta conversa.</div>
+            )}
+          </DialogContent>
+        </Dialog>
       </div>
     </div>
   );

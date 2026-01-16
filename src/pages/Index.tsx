@@ -1,9 +1,20 @@
 import { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { MessageSquare, Target, TrendingUp, BookOpen, Sparkles, Zap, Info } from "lucide-react";
+import { MessageSquare, Target, TrendingUp, BookOpen, Sparkles, Zap, Info, MoreVertical } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle
+} from "@/components/ui/alert-dialog";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import ChatInterface from "@/components/ChatInterface";
 import { KnowledgeBaseManager } from "@/components/KnowledgeBaseManager";
@@ -16,7 +27,7 @@ import knowledgeIllustration from "@/assets/knowledge-illustration.jpg";
 import ClientSwitcher from "@/components/ClientSwitcher";
 import ProfileMenu from "@/components/ProfileMenu";
 import { useNavigate } from "react-router-dom";
-import { getAuthHeader, clearTokens, getClientId } from "@/lib/auth";
+import { getAuthHeader, clearTokens, getClientId, setClientId } from "@/lib/auth";
 import { getCommonHeaders } from "@/lib/auth";
 
 interface KnowledgeEntry {
@@ -25,48 +36,6 @@ interface KnowledgeEntry {
   category: string;
 }
 
-const scenarios = [
-  {
-    id: "limite",
-    title: "Solicitação de Aumento de Limite",
-    description: "Cliente deseja aumentar o limite do cartão de crédito",
-    profiles: [
-      { id: "calmo", label: "Cliente Calmo", emotion: "😊" },
-      { id: "ansioso", label: "Cliente Ansioso", emotion: "😰" },
-      { id: "irritado", label: "Cliente Irritado", emotion: "😠" },
-    ],
-  },
-  {
-    id: "cobranca",
-    title: "Contestação de Cobrança",
-    description: "Cliente contesta uma cobrança não reconhecida",
-    profiles: [
-      { id: "confuso", label: "Cliente Confuso", emotion: "🤔" },
-      { id: "preocupado", label: "Cliente Preocupado", emotion: "😟" },
-      { id: "irritado", label: "Cliente Muito Irritado", emotion: "😡" },
-    ],
-  },
-  {
-    id: "cartao",
-    title: "Problema com Cartão",
-    description: "Cliente com problema de cartão bloqueado ou não recebido",
-    profiles: [
-      { id: "calmo", label: "Cliente Calmo", emotion: "😊" },
-      { id: "urgente", label: "Cliente com Urgência", emotion: "⏰" },
-      { id: "frustrado", label: "Cliente Frustrado", emotion: "😤" },
-    ],
-  },
-  {
-    id: "credito",
-    title: "Solicitação de Crédito",
-    description: "Cliente interessado em contratar um empréstimo",
-    profiles: [
-      { id: "empolgado", label: "Cliente Empolgado", emotion: "🤩" },
-      { id: "cauteloso", label: "Cliente Cauteloso", emotion: "🤨" },
-      { id: "desconfiado", label: "Cliente Desconfiado", emotion: "🧐" },
-    ],
-  },
-];
 
 const Index = () => {
   const [selectedScenario, setSelectedScenario] = useState<string | null>(null);
@@ -78,9 +47,115 @@ const Index = () => {
   const [canStartChat, setCanStartChat] = useState<boolean>(false);
   const [isAdmin, setIsAdmin] = useState<boolean>(false);
   const [hasAdmin, setHasAdmin] = useState<boolean>(true);
+  const [scenarios, setScenarios] = useState<any[]>([]);
+  const [canManageScenarios, setCanManageScenarios] = useState<boolean>(false);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState<boolean>(false);
+  const [deleteTargetScenario, setDeleteTargetScenario] = useState<any | null>(null);
+  const [deletingScenario, setDeletingScenario] = useState<boolean>(false);
+  // Arquivamento quando cenário está em uso em conversas (inclui soft-deletadas)
+  const [showArchiveScenarioDialog, setShowArchiveScenarioDialog] = useState<boolean>(false);
+  const [archiveScenarioTarget, setArchiveScenarioTarget] = useState<any | null>(null);
+  const [archiveScenarioCount, setArchiveScenarioCount] = useState<number | null>(null);
+  const [archivingScenario, setArchivingScenario] = useState<boolean>(false);
 
   const API_BASE = import.meta.env?.VITE_API_BASE_URL || "";
   const navigate = useNavigate();
+
+  const loadScenarios = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/scenarios`, {
+        headers: getCommonHeaders(),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error((data as any)?.error || `Erro HTTP ${res.status}`);
+      }
+      setScenarios(Array.isArray(data) ? data : []);
+    } catch (error) {
+      console.error("Erro ao carregar cenários:", error);
+      setScenarios([]);
+    }
+  };
+
+  async function handleDeleteScenario(id: string) {
+    setDeletingScenario(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/scenarios/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+        headers: {
+          ...getCommonHeaders(),
+          "Content-Type": "application/json",
+        },
+      });
+      const text = await res.text();
+      let data: any = {};
+      try { data = JSON.parse(text); } catch {}
+
+      if (!res.ok) {
+        // Cenário em uso (inclui conversas soft-deletadas): sugerir arquivar
+        if (res.status === 409 && (data?.code === "SCENARIO_IN_USE")) {
+          // Fecha dialog de remoção e abre de arquivamento
+          const target = scenarios.find((s) => s.id === id) || deleteTargetScenario || null;
+          setDeleteConfirmOpen(false);
+          setDeleteTargetScenario(null);
+          setArchiveScenarioTarget(target);
+          setArchiveScenarioCount(typeof data?.referencedCount === "number" ? data.referencedCount : null);
+          setShowArchiveScenarioDialog(true);
+          return;
+        }
+        throw new Error(data?.error || `Erro HTTP ${res.status}`);
+      }
+
+      // Reset seleção se removido
+      if (selectedScenario === id) {
+        setSelectedScenario(null);
+        setSelectedProfile(null);
+        setSelectedProcess("");
+        setShowChat(false);
+      }
+      await loadScenarios();
+    } catch (e: any) {
+      console.error("Erro ao remover cenário:", e);
+    } finally {
+      setDeletingScenario(false);
+      setDeleteConfirmOpen(false);
+      setDeleteTargetScenario(null);
+    }
+  }
+
+  async function handleArchiveScenario(id: string) {
+    setArchivingScenario(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/scenarios/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        headers: {
+          ...getCommonHeaders(),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ status: "archived" }),
+      });
+      const txt = await res.text();
+      if (!res.ok) {
+        let j: any; try { j = JSON.parse(txt); } catch {}
+        throw new Error(j?.error || `Erro HTTP ${res.status}`);
+      }
+      // Se arquivado e estava selecionado, limpar seleção
+      if (selectedScenario === id) {
+        setSelectedScenario(null);
+        setSelectedProfile(null);
+        setSelectedProcess("");
+        setShowChat(false);
+      }
+      await loadScenarios();
+    } catch (e: any) {
+      console.error("Erro ao arquivar cenário:", e);
+    } finally {
+      setArchivingScenario(false);
+      setShowArchiveScenarioDialog(false);
+      setArchiveScenarioTarget(null);
+      setArchiveScenarioCount(null);
+    }
+  }
 
   // Carrega permissões do usuário para o cliente selecionado (can_start_chat)
   const loadPermissions = async () => {
@@ -93,21 +168,37 @@ const Index = () => {
       });
       if (!res.ok) {
         setCanStartChat(false);
+        setCanManageScenarios(false);
         return;
       }
       const data = await res.json();
-      const cid = getClientId();
+      let cid = getClientId();
+
+      // Auto-seleciona o primeiro cliente disponível caso nenhum esteja selecionado
+      if (!cid && Array.isArray(data.clients) && data.clients.length > 0) {
+        cid = data.clients[0].client_id;
+        setClientId(cid);
+        // Notifica toda a aplicação sobre a troca de cliente para recarregar dados dependentes
+        try {
+          const ev = new Event("client:changed");
+          window.dispatchEvent(ev);
+        } catch {}
+      }
+
       const found = (data.clients || []).find((c: any) => c.client_id === cid);
       setCanStartChat(Boolean(found?.permissions?.can_start_chat));
+      setCanManageScenarios(Boolean(found?.permissions?.can_manage_scenarios));
       setIsAdmin(Boolean(data?.user?.is_admin));
     } catch {
       setCanStartChat(false);
+      setCanManageScenarios(false);
     }
   };
 
   useEffect(() => {
     loadPermissions();
     loadAdminStatus();
+    loadScenarios();
   }, []);
 
   async function loadAdminStatus() {
@@ -175,6 +266,7 @@ const Index = () => {
       loadPermissions();
       loadAdminStatus();
       loadProcesses();
+      loadScenarios();
       setShowChat(false);
       setSelectedScenario(null);
       setSelectedProfile(null);
@@ -219,14 +311,14 @@ const Index = () => {
   };
 
   if (showChat && selectedScenario && selectedProfile) {
-    const scenario = scenarios.find(s => s.id === selectedScenario);
-    const profile = scenario?.profiles.find(p => p.id === selectedProfile);
-    
+    const scenario = scenarios.find((s: any) => s.id === selectedScenario);
+    const profileLabel = selectedProfile;
+
     return (
       <ChatInterface
-        scenario={scenario!.title}
-        customerProfile={profile!.label}
-        processId={selectedProcess || undefined}
+        scenario={scenario?.title || "Cenário"}
+        customerProfile={profileLabel}
+        processId={selectedProcess && selectedProcess !== "none" ? selectedProcess : undefined}
         onBack={handleBackToMenu}
       />
     );
@@ -566,13 +658,20 @@ const Index = () => {
 
             {/* Scenario Selection */}
             <div className="max-w-4xl mx-auto" id="scenarios-section">
-              <h2 className="text-2xl font-bold text-primary mb-6">Escolha um Cenário</h2>
+              <div className="flex items-center justify-between mb-6">
+                <h2 className="text-2xl font-bold text-primary">Escolha um Cenário</h2>
+                {canManageScenarios && (
+                  <Button variant="outline" onClick={() => navigate("/lab")}>
+                    Laboratório
+                  </Button>
+                )}
+              </div>
               
               <div className="grid md:grid-cols-2 gap-6 mb-8">
                 {scenarios.map((scenario) => (
                   <Card
                     key={scenario.id}
-                    className={`cursor-pointer transition-all hover:shadow-glow ${
+                    className={`relative cursor-pointer transition-all hover:shadow-glow ${
                       selectedScenario === scenario.id
                         ? 'ring-2 ring-secondary shadow-glow'
                         : 'hover:border-secondary'
@@ -582,34 +681,137 @@ const Index = () => {
                       setSelectedProfile(null);
                     }}
                   >
-                    <CardHeader>
-                      <CardTitle className="text-lg">{scenario.title}</CardTitle>
-                      <CardDescription>{scenario.description}</CardDescription>
+                    {(isAdmin || canManageScenarios) && (
+                      <div className="absolute top-2 right-2 z-10" onClick={(e) => e.stopPropagation()}>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 hover:text-accent-foreground h-10 w-10 hover:bg-muted"
+                            >
+                              <MoreVertical />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                navigate(`/cenarios?edit=${encodeURIComponent(scenario.id)}`);
+                              }}
+                            >
+                              Editar informações
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              className="text-destructive"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setDeleteTargetScenario(scenario);
+                                setDeleteConfirmOpen(true);
+                              }}
+                            >
+                              Remover cenário
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
+                    )}
+                    <CardHeader className="flex items-start justify-between">
+                      <div>
+                        <CardTitle className="text-lg">{scenario.title}</CardTitle>
+                        <CardDescription>{scenario.motivo_label || ""}</CardDescription>
+                      </div>
                     </CardHeader>
                     {selectedScenario === scenario.id && (
                       <CardContent>
                         <p className="text-sm font-semibold mb-3 text-primary">Escolha o perfil do cliente:</p>
-                        <div className="space-y-2">
-                          {scenario.profiles.map((profile) => (
-                            <Button
-                              key={profile.id}
-                              variant={selectedProfile === profile.id ? "default" : "outline"}
-                              className="w-full justify-start"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setSelectedProfile(profile.id);
-                              }}
-                            >
-                              <span className="mr-2 text-xl">{profile.emotion}</span>
-                              {profile.label}
-                            </Button>
-                          ))}
-                        </div>
+                        {Array.isArray(scenario.profiles) && scenario.profiles.length > 0 ? (
+                          <div className="space-y-2">
+                            {scenario.profiles.map((label: string) => (
+                              <Button
+                                key={label}
+                                variant={selectedProfile === label ? "default" : "outline"}
+                                className="w-full justify-start"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedProfile(label);
+                                  // Pré-seleciona processo vinculado ao cenário, se existir
+                                  const defProcess = scenario?.metadata?.process_kb_id || "";
+                                  setSelectedProcess(defProcess);
+                                }}
+                              >
+                                {label}
+                              </Button>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-sm text-muted-foreground">Sem perfis definidos.</p>
+                        )}
                       </CardContent>
                     )}
                   </Card>
                 ))}
               </div>
+
+              <AlertDialog open={deleteConfirmOpen} onOpenChange={setDeleteConfirmOpen}>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>Remover cenário</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      {deleteTargetScenario
+                        ? `Tem certeza que deseja remover o cenário "${deleteTargetScenario.title}"? Esta ação é irreversível.`
+                        : "Tem certeza que deseja remover este cenário? Esta ação é irreversível."}
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel
+                      onClick={() => {
+                        setDeleteConfirmOpen(false);
+                        setDeleteTargetScenario(null);
+                      }}
+                    >
+                      Cancelar
+                    </AlertDialogCancel>
+                    <AlertDialogAction
+                      onClick={() => deleteTargetScenario && handleDeleteScenario(deleteTargetScenario.id)}
+                      disabled={deletingScenario}
+                    >
+                      {deletingScenario ? "Removendo..." : "Remover"}
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+
+              <AlertDialog open={showArchiveScenarioDialog} onOpenChange={setShowArchiveScenarioDialog}>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>Arquivar cenário</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      {archiveScenarioTarget ? (
+                        <>
+                          O cenário <strong>{archiveScenarioTarget.title}</strong> está em uso em conversas
+                          {typeof archiveScenarioCount === "number" ? ` (${archiveScenarioCount})` : ""}. Você pode arquivá-lo para ocultá-lo das seleções sem perder histórico.
+                        </>
+                      ) : (
+                        <>Este cenário está em uso em conversas. Você pode arquivá-lo.</>
+                      )}
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel
+                      onClick={() => { setShowArchiveScenarioDialog(false); setArchiveScenarioTarget(null); setArchiveScenarioCount(null); }}
+                    >
+                      Cancelar
+                    </AlertDialogCancel>
+                    <AlertDialogAction
+                      onClick={() => archiveScenarioTarget && handleArchiveScenario(archiveScenarioTarget.id)}
+                      disabled={archivingScenario}
+                    >
+                      {archivingScenario ? "Arquivando..." : "Arquivar"}
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
 
               {/* Process Selection */}
               {processes.length > 0 && selectedScenario && selectedProfile && (

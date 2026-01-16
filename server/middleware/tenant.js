@@ -27,7 +27,8 @@ export function requireTenant(pgClient) {
       // Verifica associação e carrega permissões
       const perms = await pgClient.query(
         `SELECT uc.user_id, uc.client_id, uc.tipo_usuario,
-                uc.can_start_chat, uc.can_edit_kb, uc.can_view_team_chats, uc.can_view_all_client_chats
+                uc.can_start_chat, uc.can_edit_kb, uc.can_view_team_chats, uc.can_view_all_client_chats,
+                uc.can_manage_scenarios
            FROM public.user_clients uc
           WHERE uc.user_id = $1 AND uc.client_id = $2`,
         [req.user.id, clientId]
@@ -52,6 +53,7 @@ export function requireTenant(pgClient) {
         can_edit_kb: p.can_edit_kb,
         can_view_team_chats: p.can_view_team_chats,
         can_view_all_client_chats: p.can_view_all_client_chats,
+        can_manage_scenarios: p.can_manage_scenarios,
       };
       req.userEmployee = {
         matricula: link.rows[0]?.matricula || null,
