@@ -76,6 +76,7 @@ const Lab: React.FC = () => {
   const [committed, setCommitted] = useState<Set<string>>(new Set());
   const [authChecked, setAuthChecked] = useState(false);
   const [canManage, setCanManage] = useState(false);
+  const [maxPerMotivo, setMaxPerMotivo] = useState<number>(80);
 
   // Preview/mapeamento de colunas
   const requiredCanonicals = useMemo(() => ([
@@ -328,6 +329,7 @@ const Lab: React.FC = () => {
       const res = await fetch(`${API_BASE}/api/lab/scenarios/analyze/${encodeURIComponent(runId)}`, {
         method: "POST",
         headers: getCommonHeaders(),
+        body: JSON.stringify({ max_per_motivo: maxPerMotivo }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -528,6 +530,21 @@ const Lab: React.FC = () => {
           <div className="flex items-center justify-between">
             <h2 className="font-semibold">Análise e Progresso</h2>
             <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2">
+                <Label htmlFor="max-per-motivo" className="text-xs">Qtd por motivo</Label>
+                <Input
+                  id="max-per-motivo"
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={maxPerMotivo}
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value || "0", 10);
+                    setMaxPerMotivo(Number.isFinite(v) && v > 0 ? v : 80);
+                  }}
+                  className="w-24 h-8 text-sm"
+                />
+              </div>
               <Button variant="outline" onClick={async () => { await loadResults(); }} disabled={!runId}>Carregar Resultados</Button>
               <Button onClick={handleStartAnalysis} disabled={!runId || runStatus === "running"}>Iniciar Análise</Button>
             </div>

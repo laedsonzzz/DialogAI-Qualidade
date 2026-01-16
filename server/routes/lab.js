@@ -298,6 +298,7 @@ export function labRoutes(pgClient) {
   router.post('/scenarios/analyze/:run_id', requireCanManageScenarios(), async (req, res) => {
     try {
       const { run_id } = req.params;
+      const { max_per_motivo } = req.body || {};
       // Verifica se o run pertence ao cliente
       const r = await pgClient.query(
         `SELECT id, status FROM public.lab_runs WHERE id = $1 AND client_id = $2`,
@@ -305,6 +306,12 @@ export function labRoutes(pgClient) {
       );
       if (r.rows.length === 0) {
         return res.status(404).json({ error: 'Execução não encontrada neste cliente' });
+      }
+
+      // Normaliza quantidade por motivo (padrão 80, mínimo 1)
+      let maxPerMotivo = parseInt(String(max_per_motivo ?? '80'), 10);
+      if (!Number.isFinite(maxPerMotivo) || maxPerMotivo < 1) {
+        maxPerMotivo = 80;
       }
 
       // Marca como running (idempotente)
@@ -320,14 +327,14 @@ export function labRoutes(pgClient) {
         entityId: String(run_id),
         action: 'start_analysis',
         before: { status: r.rows[0].status },
-        after: { status: 'running' },
+        after: { status: 'running', max_per_motivo: maxPerMotivo },
       });
 
-      // Inicia job assíncrono
-      await startLabAnalysis(pgClient, { runId: run_id, clientId: req.clientId });
+      // Inicia job assíncrono com limite configurável
+      await startLabAnalysis(pgClient, { runId: run_id, clientId: req.clientId, maxPerMotivo });
 
       // Retorna 202 Accepted indicando que a análise foi agendada
-      return res.status(202).json({ ok: true, started: true, run_id });
+      return res.status(202).json({ ok: true, started: true, run_id, max_per_motivo: maxPerMotivo });
     } catch (err) {
       console.error('Lab analyze start error:', err);
       return res.status(500).json({ error: 'Erro ao iniciar análise' });

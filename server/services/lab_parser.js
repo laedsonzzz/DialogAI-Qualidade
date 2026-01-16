@@ -212,45 +212,53 @@ function parseCsv(buffer, mapping) {
 
   const warnings = [];
   const rows = [];
-
-  // Fallback de seq quando ausência/valores inválidos: por IdAtendimento incremental
-  const seqTracker = new Map(); // atendimento_id -> seqAtual
-
+ 
+  // Controle de sequência por IdAtendimento para garantir unicidade (run_id, atendimento_id, seq)
+  // Mantém maior seq utilizada e set de sequências usadas para resolver duplicidades
+  const perIdSeq = new Map(); // atendimento_id -> { used: Set<number>, max: number }
+  function ensureState(atId) {
+    if (!perIdSeq.has(atId)) perIdSeq.set(atId, { used: new Set(), max: 0 });
+    return perIdSeq.get(atId);
+  }
+ 
   for (let i = 0; i < records.length; i++) {
     const rec = records[i];
-
+ 
     const idAt = sanitizeText(getRecordValueMapped(rec, 'idAtendimento', mapping));
     const msg = sanitizeText(getRecordValueMapped(rec, 'message', mapping));
     const role = getRecordValueMapped(rec, 'role', mapping);
     const ordemVal = getRecordValueMapped(rec, 'ordem', mapping);
     const motivo = sanitizeText(getRecordValueMapped(rec, 'motivoDeContato', mapping));
-
+ 
     const missing = [];
     if (!idAt) missing.push('IdAtendimento');
     if (!msg) missing.push('Message');
     if (role === undefined || role === null || String(role).trim() === '') missing.push('Role');
     if (ordemVal === undefined || ordemVal === null || String(ordemVal).trim() === '') missing.push('Ordem');
     if (!motivo) missing.push('MotivoDeContato');
-
+ 
     if (missing.length > 0) {
       warnings.push(`Linha ${i + 2}: campos ausentes -> ${missing.join(', ')}`);
       continue; // ignora linha inválida
     }
-
+ 
     const { role_raw, role_norm } = normalizeRoleValue(role);
     if (!role_norm) {
       warnings.push(`Linha ${i + 2}: Role desconhecido (${String(role).trim()})`);
     }
-
+ 
+    const st = ensureState(idAt);
     let seq = coerceInt(ordemVal);
-    if (seq === null) {
-      const k = idAt;
-      const cur = (seqTracker.get(k) || 0) + 1;
-      seqTracker.set(k, cur);
-      seq = cur;
+    if (seq === null || !Number.isFinite(seq) || seq < 1) {
+      seq = st.max + 1;
       warnings.push(`Linha ${i + 2}: Ordem inválida; atribuído seq=${seq} automaticamente`);
+    } else if (st.used.has(seq)) {
+      seq = st.max + 1;
+      warnings.push(`Linha ${i + 2}: Ordem duplicada para IdAtendimento=${idAt}; ajustado seq=${seq}`);
     }
-
+    st.used.add(seq);
+    if (seq > st.max) st.max = seq;
+ 
     rows.push({
       atendimento_id: idAt,
       motivo,
@@ -289,43 +297,51 @@ function parseXlsx(buffer, mapping) {
 
   const warnings = [];
   const rows = [];
-  const seqTracker = new Map();
-
+  // Controle de sequência por IdAtendimento para XLSX
+  const perIdSeq = new Map(); // atendimento_id -> { used: Set<number>, max: number }
+  function ensureState(atId) {
+    if (!perIdSeq.has(atId)) perIdSeq.set(atId, { used: new Set(), max: 0 });
+    return perIdSeq.get(atId);
+  }
+ 
   for (let i = 0; i < records.length; i++) {
     const rec = records[i];
-
+ 
     const idAt = sanitizeText(getRecordValueMapped(rec, 'idAtendimento', mapping));
     const msg = sanitizeText(getRecordValueMapped(rec, 'message', mapping));
     const role = getRecordValueMapped(rec, 'role', mapping);
     const ordemVal = getRecordValueMapped(rec, 'ordem', mapping);
     const motivo = sanitizeText(getRecordValueMapped(rec, 'motivoDeContato', mapping));
-
+ 
     const missing = [];
     if (!idAt) missing.push('IdAtendimento');
     if (!msg) missing.push('Message');
     if (role === undefined || role === null || String(role).trim() === '') missing.push('Role');
     if (ordemVal === undefined || ordemVal === null || String(ordemVal).trim() === '') missing.push('Ordem');
     if (!motivo) missing.push('MotivoDeContato');
-
+ 
     if (missing.length > 0) {
       warnings.push(`Linha ${i + 2}: campos ausentes -> ${missing.join(', ')}`);
       continue;
     }
-
+ 
     const { role_raw, role_norm } = normalizeRoleValue(role);
     if (!role_norm) {
       warnings.push(`Linha ${i + 2}: Role desconhecido (${String(role).trim()})`);
     }
-
+ 
+    const st = ensureState(idAt);
     let seq = coerceInt(ordemVal);
-    if (seq === null) {
-      const k = idAt;
-      const cur = (seqTracker.get(k) || 0) + 1;
-      seqTracker.set(k, cur);
-      seq = cur;
+    if (seq === null || !Number.isFinite(seq) || seq < 1) {
+      seq = st.max + 1;
       warnings.push(`Linha ${i + 2}: Ordem inválida; atribuído seq=${seq} automaticamente`);
+    } else if (st.used.has(seq)) {
+      seq = st.max + 1;
+      warnings.push(`Linha ${i + 2}: Ordem duplicada para IdAtendimento=${idAt}; ajustado seq=${seq}`);
     }
-
+    st.used.add(seq);
+    if (seq > st.max) st.max = seq;
+ 
     rows.push({
       atendimento_id: idAt,
       motivo,

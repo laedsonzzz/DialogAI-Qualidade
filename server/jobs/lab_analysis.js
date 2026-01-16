@@ -220,7 +220,7 @@ FORMATO OBRIGATÓRIO (JSON estrito, sem comentários):
 /**
  * Inicia o job de análise (não bloqueante).
  */
-export async function startLabAnalysis(pgClient, { runId, clientId }) {
+export async function startLabAnalysis(pgClient, { runId, clientId, maxPerMotivo }) {
   // Executa em background sem bloquear o request, usando microtask para não segurar o loop atual
   setImmediate(async () => {
     let fatal = null;
@@ -265,7 +265,8 @@ export async function startLabAnalysis(pgClient, { runId, clientId }) {
         const allIds = idsRes.rows.map((r) => r.atendimento_id);
 
         // Amostra controlada para enviar ao LLM
-        const sampleIds = allIds.slice(0, LAB_MAX_SAMPLE_ATT);
+        const limit = Math.max(1, Number(maxPerMotivo ?? LAB_MAX_SAMPLE_ATT ?? 80));
+        const sampleIds = allIds.slice(0, limit);
         const samples = [];
 
         for (const atendimentoId of allIds) {
