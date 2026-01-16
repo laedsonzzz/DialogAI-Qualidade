@@ -11,6 +11,7 @@ import { getAuthHeader, getClientId, getCommonHeaders } from "@/lib/auth";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Info } from "lucide-react";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 
 type UploadResponse = {
   ok: boolean;
@@ -88,6 +89,14 @@ const Lab: React.FC = () => {
     operator_guidelines: string[];
     patterns: string[];
   }>>({});
+  // Conflito (título ou motivo_label) com cenário existente ativo
+  const [conflictDialogOpen, setConflictDialogOpen] = useState(false);
+  const [conflictScenario, setConflictScenario] = useState<null | { id: string; title: string; motivo_label: string; status: string }>(null);
+  const [conflictReferencedCount, setConflictReferencedCount] = useState<number>(0);
+  const [conflictMessage, setConflictMessage] = useState<string | null>(null);
+  const [conflictActionLoading, setConflictActionLoading] = useState<null | 'delete' | 'archive' | 'keep_both'>(null);
+  const [conflictCode, setConflictCode] = useState<string | null>(null);
+  const [pendingCommitMotivo, setPendingCommitMotivo] = useState<string | null>(null);
 
   // Preview/mapeamento de colunas
   const requiredCanonicals = useMemo(() => ([
@@ -500,6 +509,7 @@ const Lab: React.FC = () => {
 
   async function handleCommit(motivo: string) {
     if (!runId) return;
+    setPendingCommitMotivo(motivo);
     try {
       setCommitting((prev) => ({ ...prev, [motivo]: true }));
       const res = await fetch(`${API_BASE}/api/lab/scenarios/commit`, {
@@ -507,18 +517,155 @@ const Lab: React.FC = () => {
         headers: getCommonHeaders(),
         body: JSON.stringify({ run_id: runId, motivo }),
       });
-      const data = await res.json().catch(() => ({}));
+      const txt = await res.text();
+      let data: any = {};
+      try { data = JSON.parse(txt); } catch {}
       if (!res.ok) {
-        throw new Error((data as any)?.error || `Erro HTTP ${res.status}`);
+        // Conflito de título idêntico
+        if (res.status === 409 && data?.code === "SCENARIO_TITLE_EXISTS" && data?.conflict) {
+          setConflictScenario({
+            id: data.conflict.id,
+            title: data.conflict.title,
+            motivo_label: data.conflict.motivo_label,
+            status: data.conflict.status,
+          });
+          setConflictReferencedCount(Number(data.referencedCount || 0));
+          setConflictMessage(String(data?.error || "Conflito de título de cenário."));
+          setConflictCode("SCENARIO_TITLE_EXISTS");
+          setConflictDialogOpen(true);
+          // Não lançar erro para não mostrar toast genérico
+        } else if (res.status === 409 && data?.code === "SCENARIO_MOTIVO_CONFLICT" && data?.conflict) {
+          // Conflito por motivo_label com título diferente -> oferecer manter ambos/arquivar/remover
+          setConflictScenario({
+            id: data.conflict.id,
+            title: data.conflict.title,
+            motivo_label: data.conflict.motivo_label,
+            status: data.conflict.status,
+          });
+          setConflictReferencedCount(Number(data.referencedCount || 0));
+          setConflictMessage(String(data?.error || "Já existe cenário ativo com o mesmo motivo e título diferente."));
+          setConflictCode("SCENARIO_MOTIVO_CONFLICT");
+          setConflictDialogOpen(true);
+        } else {
+          throw new Error(data?.error || `Erro HTTP ${res.status}`);
+        }
+        return;
       }
       setCommitted((prev) => new Set([...prev, motivo]));
       toast({ title: "Cenário commitado", description: `Motivo "${motivo}" enviado ao banco principal` });
     } catch (e: any) {
-      toast({ title: "Erro ao commitar cenário", description: String(e?.message || e), variant: "destructive" });
+      // Evita duplicar toast quando já abrimos o diálogo de conflito
+      if (!conflictDialogOpen) {
+        toast({ title: "Erro ao commitar cenário", description: String(e?.message || e), variant: "destructive" });
+      }
     } finally {
       setCommitting((prev) => ({ ...prev, [motivo]: false }));
     }
   }
+
+  // Resolver conflito: Remover cenário antigo
+  async function resolveConflictDelete() {
+    if (!conflictScenario) return;
+    setConflictActionLoading('delete');
+    try {
+      const res = await fetch(`${API_BASE}/api/scenarios/${encodeURIComponent(conflictScenario.id)}`, {
+        method: "DELETE",
+        headers: getCommonHeaders(),
+      });
+      const txt = await res.text();
+      let data: any = {};
+      try { data = JSON.parse(txt); } catch {}
+      if (!res.ok) {
+        if (res.status === 409 && data?.code === 'SCENARIO_IN_USE') {
+          toast({
+            title: "Não é possível remover",
+            description: "O cenário está em uso em conversas. Utilize a opção Arquivar para ocultá-lo sem remover histórico.",
+            variant: "destructive",
+          });
+        } else {
+          throw new Error(data?.error || `Erro HTTP ${res.status}`);
+        }
+        return;
+      }
+      toast({
+        title: "Cenário removido",
+        description: `O cenário "${conflictScenario.title}" foi removido. Clique novamente em Commit para prosseguir.`,
+      });
+      setConflictDialogOpen(false);
+      setConflictScenario(null);
+      setConflictReferencedCount(0);
+      setConflictMessage(null);
+      setConflictCode(null);
+    } catch (e: any) {
+      toast({ title: "Erro ao remover cenário", description: String(e?.message || e), variant: "destructive" });
+    } finally {
+      setConflictActionLoading(null);
+    }
+  }
+
+  // Resolver conflito: Arquivar cenário antigo
+  async function resolveConflictArchive() {
+    if (!conflictScenario) return;
+    setConflictActionLoading('archive');
+    try {
+      const res = await fetch(`${API_BASE}/api/scenarios/${encodeURIComponent(conflictScenario.id)}`, {
+        method: "PATCH",
+        headers: getCommonHeaders(),
+        body: JSON.stringify({ status: "archived" }),
+      });
+      const txt = await res.text();
+      let data: any = {};
+      try { data = JSON.parse(txt); } catch {}
+      if (!res.ok) {
+        throw new Error(data?.error || `Erro HTTP ${res.status}`);
+      }
+      toast({
+        title: "Cenário arquivado",
+        description: `O cenário "${conflictScenario.title}" foi arquivado. Clique novamente em Commit para prosseguir.`,
+      });
+      setConflictDialogOpen(false);
+      setConflictScenario(null);
+      setConflictReferencedCount(0);
+      setConflictMessage(null);
+      setConflictCode(null);
+    } catch (e: any) {
+      toast({ title: "Erro ao arquivar cenário", description: String(e?.message || e), variant: "destructive" });
+    } finally {
+      setConflictActionLoading(null);
+    }
+  }
+
+  // Resolver conflito: Manter ambos (commit automático com strategy keep_both)
+  async function resolveConflictKeepBoth() {
+    if (!runId || !pendingCommitMotivo) return;
+    setConflictActionLoading('keep_both');
+    try {
+      const res = await fetch(`${API_BASE}/api/lab/scenarios/commit`, {
+        method: "POST",
+        headers: getCommonHeaders(),
+        body: JSON.stringify({ run_id: runId, motivo: pendingCommitMotivo, strategy: 'keep_both' }),
+      });
+      const txt = await res.text();
+      let data: any = {};
+      try { data = JSON.parse(txt); } catch {}
+
+      if (!res.ok) {
+        throw new Error(data?.error || `Erro HTTP ${res.status}`);
+      }
+      setCommitted((prev) => new Set([...prev, pendingCommitMotivo]));
+      toast({ title: "Cenário commitado", description: `Mantidos ambos para o motivo "${pendingCommitMotivo}".` });
+      setConflictDialogOpen(false);
+      setConflictScenario(null);
+      setConflictReferencedCount(0);
+      setConflictMessage(null);
+      setConflictCode(null);
+    } catch (e: any) {
+      toast({ title: "Erro ao manter ambos", description: String(e?.message || e), variant: "destructive" });
+    } finally {
+      setConflictActionLoading(null);
+    }
+  }
+
 
   // Exibição de "atendimentos amostrados" sem somar motivos diferentes:
   // - Se houver exatamente 1 motivo, o topo mostra o progresso desse motivo (processed/total).
@@ -676,7 +823,7 @@ const Lab: React.FC = () => {
 
           <div className="mt-4">
             <div className="flex items-center justify-between mb-2">
-              <span className="text-sm">Atendimentos amostrados</span>
+              <span className="text-sm">Atendimentos analisados</span>
               <span className="text-xs text-muted-foreground">
                 {singleMotivo ? (
                   <>
@@ -933,6 +1080,61 @@ const Lab: React.FC = () => {
             {results.length === 0 && <p className="text-sm text-muted-foreground">Sem resultados carregados. Inicie a análise e/ou carregue os resultados.</p>}
           </div>
         </Card>
+
+        {/* Diálogo de resolução de conflito */}
+        <AlertDialog open={conflictDialogOpen} onOpenChange={(o) => setConflictDialogOpen(o)}>
+          <AlertDialogContent className="w-[calc(100vw-2rem)] max-w-[42rem] overflow-x-hidden">
+            <AlertDialogHeader>
+              <AlertDialogTitle>Conflito ao commitar cenário</AlertDialogTitle>
+              <AlertDialogDescription className="break-words">
+                {conflictMessage ||
+                  (conflictCode === 'SCENARIO_MOTIVO_CONFLICT'
+                    ? 'Já existe um cenário ativo com o mesmo motivo_label e um título diferente. Escolha remover, arquivar ou manter ambos.'
+                    : 'Já existe um cenário ativo com este título (comparação case-insensitive com normalização de espaços).')}
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+
+            {conflictScenario && (
+              <div className="text-sm text-muted-foreground space-y-1 break-words">
+                <div><span className="text-foreground">Título:</span> {conflictScenario.title}</div>
+                <div><span className="text-foreground">Motivo:</span> {conflictScenario.motivo_label}</div>
+                <div><span className="text-foreground">Referências em conversas:</span> {conflictReferencedCount}</div>
+                {conflictReferencedCount > 0 && (
+                  <div className="text-xs">
+                    Este cenário possui conversas vinculadas. A remoção irá falhar; utilize "Arquivar" para ocultá-lo sem perder histórico.
+                  </div>
+                )}
+              </div>
+            )}
+
+            <AlertDialogFooter className="flex flex-row flex-wrap justify-end gap-2">
+              {conflictCode === 'SCENARIO_MOTIVO_CONFLICT' && (
+                <AlertDialogAction
+                  className="bg-primary text-primary-foreground hover:bg-primary/90"
+                  disabled={!!conflictActionLoading}
+                  onClick={resolveConflictKeepBoth}
+                >
+                  {conflictActionLoading === 'keep_both' ? 'Mantendo...' : 'Manter ambos'}
+                </AlertDialogAction>
+              )}
+              <AlertDialogAction
+                className="bg-muted text-foreground"
+                disabled={!!conflictActionLoading}
+                onClick={resolveConflictArchive}
+              >
+                {conflictActionLoading === 'archive' ? 'Arquivando...' : 'Arquivar cenário antigo'}
+              </AlertDialogAction>
+              <AlertDialogAction
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                disabled={!!conflictActionLoading || (conflictReferencedCount > 0)}
+                onClick={resolveConflictDelete}
+              >
+                {conflictActionLoading === 'delete' ? 'Removendo...' : 'Remover cenário antigo'}
+              </AlertDialogAction>
+              <AlertDialogCancel disabled={!!conflictActionLoading}>Fechar</AlertDialogCancel>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </div>
     </div>
   );

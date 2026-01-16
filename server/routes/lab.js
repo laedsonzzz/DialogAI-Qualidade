@@ -630,10 +630,11 @@ export function labRoutes(pgClient) {
    */
   router.post('/scenarios/commit', requireCanManageScenarios(), async (req, res) => {
     try {
-      const { run_id, motivo } = req.body || {};
+      const { run_id, motivo, strategy } = req.body || {};
       if (!run_id || !motivo) {
         return res.status(400).json({ error: 'run_id e motivo são obrigatórios' });
       }
+      const keepBoth = ['keep_both', 'keep-both'].includes(String(strategy || '').toLowerCase());
 
       // Verifica se o run pertence ao cliente
       const rr = await pgClient.query(
@@ -666,10 +667,106 @@ export function labRoutes(pgClient) {
       const processText = typeof result.process_text === 'string' ? result.process_text : null;
       const operatorGuidelines = Array.isArray(result.operator_guidelines) ? result.operator_guidelines : [];
       const patterns = Array.isArray(result.patterns) ? result.patterns : [];
+      
+      // Verificar conflito por título (apenas cenários ativos do cliente; comparação case-insensitive com normalização de espaços)
+      const conflictCheck = await pgClient.query(
+        `SELECT id, title, motivo_label, status, created_at, updated_at
+           FROM public.scenarios
+          WHERE client_id = $1
+            AND status = 'active'
+            AND lower(btrim(regexp_replace(title, '\\s+', ' ', 'g'))) = lower(btrim(regexp_replace($2, '\\s+', ' ', 'g')))
+          ORDER BY COALESCE(updated_at, created_at) DESC
+          LIMIT 1`,
+        [req.clientId, scenarioTitle]
+      );
+      if (conflictCheck.rows.length > 0) {
+        const conflict = conflictCheck.rows[0];
+        // Contar referências em conversas (preferir scenario_id; fallback por título textual)
+        let referencedCount = 0;
+        try {
+          const ref = await pgClient.query(
+            `SELECT COUNT(*)::int AS cnt
+               FROM public.conversations
+              WHERE client_id = $1 AND scenario_id = $2`,
+            [req.clientId, conflict.id]
+          );
+          referencedCount = ref.rows[0]?.cnt ?? 0;
+        } catch (e) {
+          const refByTitle = await pgClient.query(
+            `SELECT COUNT(*)::int AS cnt
+               FROM public.conversations
+              WHERE client_id = $1 AND scenario = $2`,
+            [req.clientId, conflict.title]
+          );
+          referencedCount = refByTitle.rows[0]?.cnt ?? 0;
+        }
+        return res.status(409).json({
+          error: 'Já existe um cenário ativo com este título (comparação case-insensitive com normalização de espaços).',
+          code: 'SCENARIO_TITLE_EXISTS',
+          conflict: {
+            id: conflict.id,
+            title: conflict.title,
+            motivo_label: conflict.motivo_label,
+            status: conflict.status,
+          },
+          referencedCount,
+        });
+      }
+      
+      // Verificar conflito por motivo_label ativo com título diferente (somente quando não escolher keep_both)
+      if (!keepBoth) {
+        const motivoConflict = await pgClient.query(
+          `SELECT id, title, motivo_label, status, created_at, updated_at
+             FROM public.scenarios
+            WHERE client_id = $1
+              AND status = 'active'
+              AND motivo_label = $2
+            ORDER BY COALESCE(updated_at, created_at) DESC
+            LIMIT 1`,
+          [req.clientId, motivo]
+        );
+        if (motivoConflict.rows.length > 0) {
+          const existing = motivoConflict.rows[0];
+          // Se título for diferente (normalização: case-insensitive e colapso de espaços), abrir conflito de motivo
+          const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+          if (norm(existing.title) !== norm(scenarioTitle)) {
+            // Contar referências em conversas (preferir scenario_id; fallback por título textual)
+            let referencedCount = 0;
+            try {
+              const ref = await pgClient.query(
+                `SELECT COUNT(*)::int AS cnt
+                   FROM public.conversations
+                  WHERE client_id = $1 AND scenario_id = $2`,
+                [req.clientId, existing.id]
+              );
+              referencedCount = ref.rows[0]?.cnt ?? 0;
+            } catch (e) {
+              const refByTitle = await pgClient.query(
+                `SELECT COUNT(*)::int AS cnt
+                   FROM public.conversations
+                  WHERE client_id = $1 AND scenario = $2`,
+                [req.clientId, existing.title]
+              );
+              referencedCount = refByTitle.rows[0]?.cnt ?? 0;
+            }
+            return res.status(409).json({
+              error: 'Já existe um cenário ativo com o mesmo motivo_label e título diferente. Escolha remover, arquivar ou manter ambos.',
+              code: 'SCENARIO_MOTIVO_CONFLICT',
+              conflict: {
+                id: existing.id,
+                title: existing.title,
+                motivo_label: existing.motivo_label,
+                status: existing.status,
+              },
+              referencedCount,
+            });
+          }
+        }
+      }
 
       // Preparos para KB Operador (RAG)
       const embedder = createAzureEmbedder();
-
+      
       await pgClient.query('BEGIN');
 
       // Knowledge Base (processo) - opcional (criar antes para incluir ID no metadata do cenário)
@@ -729,18 +826,14 @@ export function labRoutes(pgClient) {
         kb_source_operator_id: kbSourceOperatorId,
       };
 
-      // Upsert em scenarios com metadata completo
-      const sUp = await pgClient.query(
+      // Inserção em scenarios com metadata completo (sem upsert por motivo_label)
+      const sIns = await pgClient.query(
         `INSERT INTO public.scenarios (client_id, motivo_label, title, metadata, created_by)
          VALUES ($1, $2, $3, $4::jsonb, $5)
-         ON CONFLICT (client_id, motivo_label) DO UPDATE
-           SET title = EXCLUDED.title,
-               metadata = EXCLUDED.metadata,
-               updated_at = now()
          RETURNING id`,
         [req.clientId, motivo, scenarioTitle, JSON.stringify(metadata), req.user?.id || null]
       );
-      const scenarioId = sUp.rows[0].id;
+      const scenarioId = sIns.rows[0].id;
 
       // Perfis
       for (const p of profiles) {

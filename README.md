@@ -132,7 +132,9 @@ A API do backend está implementada em [server/index.js](server/index.js:1) e as
     - Atualiza status no escopo do cliente
   - DELETE /api/knowledge_base/:id
     - Permissão: can_edit_kb
-    - Remove entrada por id no escopo do cliente; se houver conversas referenciando (FK process_id e mesmo client_id), retorna 409 { code: "KB_IN_USE", referencedCount }
+    - Remove entrada por id no escopo do cliente; bloqueios:
+      - Se estiver vinculada a um ou mais cenários: 409 { code: "KB_LINKED_SCENARIOS", count, scenarios: [{ id, title, motivo_label, status }] } (ver [`app.delete('/api/knowledge_base/:id')`](server/index.js:851))
+      - Se houver conversas referenciando (FK process_id e mesmo client_id): 409 { code: "KB_IN_USE", referencedCount }
 
 - Base de Conhecimento (RAG por contexto — Cliente/Operador) [server/routes/kb.js](server/routes/kb.js:1)
   - GET /api/kb/sources?kb_type=cliente|operador&status=active|archived|all
@@ -151,7 +153,7 @@ A API do backend está implementada em [server/index.js](server/index.js:1) e as
     - Atualiza status da fonte (arquivamento/reativação)
   - DELETE /api/kb/sources/:id
     - Permissão: can_edit_kb
-    - Remove fonte e seus chunks
+    - Remove fonte e seus chunks; bloqueio quando a fonte estiver vinculada a cenários (metadata.kb_source_operator_id): 409 { code: "KB_SOURCE_LINKED_SCENARIOS", count, scenarios: [{ id, title, motivo_label, status }] } (ver [`router.delete('/sources/:id')`](server/routes/kb.js:321))
   - POST /api/kb/search
     - Busca vetorial (cosine) em kb_chunks por client_id e kb_type
   - Grafos de conhecimento por fonte
@@ -176,7 +178,14 @@ A API do backend está implementada em [server/index.js](server/index.js:1) e as
     - Atualiza status (active|archived)
   - DELETE /api/scenarios/:id
     - Remove cenário e recursos vinculados quando não houver conversas referenciando; caso contrário, usar arquivamento
-
+  - Lab (criação/commit de cenários) [server/routes/lab.js](server/routes/lab.js:1)
+    - POST /api/lab/scenarios/commit
+      - Conflito por título idêntico (case-insensitive, espaços normalizados): 409 { code: "SCENARIO_TITLE_EXISTS", conflict: { id, title, motivo_label, status } }
+      - Conflito por motivo_label com títulos diferentes: 409 { code: "SCENARIO_MOTIVO_CONFLICT", conflict: {...} }; informar strategy="keep_both" para inserir novo cenário mantendo o existente
+      - Estratégia "keep_both": ao reenviar com { strategy: "keep_both" }, insere novo cenário mesmo com motivo_label já presente
+  - Remoção de cenário protege conversas:
+    - [`router.delete('/:id')`](server/routes/scenarios.js:111) retorna 409 { code: "SCENARIO_IN_USE", referencedCount } quando existem conversas referenciando o cenário (por scenario_id; fallback por título)
+  
 6. Integração com Azure OpenAI
 - A chamada para Azure Responses é feita via [fetchWithProxy()](server/index.js) usando undici [ProxyAgent](server/index.js) quando HTTP(S) proxy está configurado; caso contrário, utiliza [fetch()](server/index.js). Os headers incluem ["api-key"](server/index.js).
 - URL construída como: {AZURE_OPENAI_ENDPOINT_1}/openai/deployments/{AZURE_OPENAI_DEPLOYMENT_NAME_1}/responses?api-version={AZURE_OPENAI_API_VERSION_1}
@@ -214,6 +223,9 @@ A API do backend está implementada em [server/index.js](server/index.js:1) e as
     - GET/POST/PATCH/DELETE /api/knowledge_base (Legado)
     - RAG por contexto (/api/kb): upload de documentos, criação de fonte texto livre, listar/arquivar/reativar/excluir fontes, busca vetorial e visualização de conteúdo para fontes free_text (Operador)
     - Visualização de grafo por fonte com extração on-demand (drawer) via [src/components/GraphViewer.tsx](src/components/GraphViewer.tsx:1)
+    - Bloqueios de exclusão (KB): intercepta 409 "KB_LINKED_SCENARIOS" e "KB_SOURCE_LINKED_SCENARIOS"; exibe diálogo listando cenários vinculados e permite "Remover cenários e prosseguir exclusão" chamando [`router.delete('/:id')`](server/routes/scenarios.js:111) para cada cenário
+    - Caso alguma remoção de cenário retorne 409 "SCENARIO_IN_USE", sinaliza falha e mantém o bloqueio (o administrador deve arquivar o cenário na tela de Cenários)
+    - Após todas as remoções bem-sucedidas, reexecuta a exclusão do conhecimento alvo automaticamente
   - [src/pages/Scenarios.tsx](src/pages/Scenarios.tsx:1)
     - Listagem de cenários ativos; menu de três pontinhos por cenário com ação "Editar informações"
     - Modal de edição (UI igual ao Lab) com barra de rolagem, limites de itens e atalhos de adicionar/remover

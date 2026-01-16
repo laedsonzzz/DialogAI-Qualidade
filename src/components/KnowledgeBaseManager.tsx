@@ -80,6 +80,14 @@ export const KnowledgeBaseManager = () => {
   const [conflictCount, setConflictCount] = useState<number | null>(null);
   const { toast } = useToast();
 
+  // Diálogo de vínculo a cenários (bloqueio de exclusão)
+  const [showLinkedDialog, setShowLinkedDialog] = useState<boolean>(false);
+  const [linkedType, setLinkedType] = useState<null | 'process' | 'kb_source'>(null);
+  const [linkedTargetId, setLinkedTargetId] = useState<string | null>(null);
+  const [linkedScenarios, setLinkedScenarios] = useState<Array<{id:string; title:string; motivo_label:string; status:string}>>([]);
+  const [linkedDeleting, setLinkedDeleting] = useState<boolean>(false);
+  const [linkedDeleteStatus, setLinkedDeleteStatus] = useState<Record<string, 'pending'|'deleting'|'deleted'|'failed'>>({});
+
   const [canEditKB, setCanEditKB] = useState<boolean>(false);
   // Graph Drawer state
   const [showGraphDrawer, setShowGraphDrawer] = useState<boolean>(false);
@@ -201,6 +209,8 @@ export const KnowledgeBaseManager = () => {
       (err as any).status = res.status;
       (err as any).code = json?.code;
       (err as any).referencedCount = json?.referencedCount;
+      (err as any).scenarios = json?.scenarios;
+      (err as any).count = json?.count;
       throw err;
     }
     try { return JSON.parse(text); } catch { return text as unknown as T; }
@@ -492,11 +502,119 @@ export const KnowledgeBaseManager = () => {
       await loadSources("cliente", filterStatusCliente);
       await loadSources("operador", filterStatusOperador);
     } catch (e: any) {
+      // Bloqueio: fonte vinculada a cenários
+      if ((e as any)?.status === 409 && (e as any)?.code === 'KB_SOURCE_LINKED_SCENARIOS' && Array.isArray((e as any)?.scenarios)) {
+        setLinkedType('kb_source');
+        setLinkedTargetId(id);
+        setLinkedScenarios(((e as any).scenarios || []).map((s: any) => ({
+          id: s.id,
+          title: s.title,
+          motivo_label: s.motivo_label,
+          status: s.status,
+        })));
+        const init: Record<string,'pending'> = {};
+        for (const s of ((e as any).scenarios || [])) init[s.id] = 'pending';
+        setLinkedDeleteStatus(init as any);
+        setShowLinkedDialog(true);
+        return;
+      }
       toast({
         title: "Erro ao excluir fonte",
         description: e.message,
         variant: "destructive",
       });
+    }
+  }
+
+  // Helpers para fluxo de remoção de cenários vinculados e prosseguir exclusão do conhecimento
+  function resetLinkedDialog() {
+    setShowLinkedDialog(false);
+    setLinkedType(null);
+    setLinkedTargetId(null);
+    setLinkedScenarios([]);
+    setLinkedDeleting(false);
+    setLinkedDeleteStatus({});
+  }
+
+  async function deleteScenarioById(sid: string): Promise<boolean> {
+    try {
+      const res = await fetch(`${API_BASE}/api/scenarios/${encodeURIComponent(sid)}`, {
+        method: "DELETE",
+        headers: getCommonHeaders(),
+      });
+      const txt = await res.text();
+      if (!res.ok) {
+        let j: any; try { j = JSON.parse(txt); } catch {}
+        // Cenário em uso: não remover
+        if (res.status === 409 && j?.code === 'SCENARIO_IN_USE') {
+          return false;
+        }
+        throw new Error(j?.error || `Erro HTTP ${res.status}`);
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function removeLinkedScenariosAndProceed() {
+    if (!linkedType || !linkedTargetId) return;
+    setLinkedDeleting(true);
+    // Remover todos os cenários listados em sequência
+    const results: Record<string, 'deleted'|'failed'> = {};
+    for (const sc of linkedScenarios) {
+      setLinkedDeleteStatus((prev) => ({ ...prev, [sc.id]: 'deleting' }));
+      const ok = await deleteScenarioById(sc.id);
+      results[sc.id] = ok ? 'deleted' : 'failed';
+      setLinkedDeleteStatus((prev) => ({ ...prev, [sc.id]: ok ? 'deleted' : 'failed' }));
+    }
+
+    // Se algum falhou (ex.: SCENARIO_IN_USE), manter bloqueio e informar
+    const hasFail = Object.values(results).some((v) => v === 'failed');
+    if (hasFail) {
+      toast({
+        title: "Não foi possível remover todos os cenários",
+        description: "Alguns cenários estão em uso em conversas e não podem ser removidos. Arquive-os na página de Cenários e tente novamente.",
+        variant: "destructive",
+      });
+      setLinkedDeleting(false);
+      return;
+    }
+
+    // Prosseguir com exclusão do conhecimento alvo
+    try {
+      if (linkedType === 'process') {
+        // A remoção do cenário já pode ter excluído o processo; tratar 404 como sucesso
+        try {
+          await apiDelete(`/api/knowledge_base/${linkedTargetId}`);
+        } catch (err: any) {
+          if ((err as any)?.status !== 404) {
+            throw err;
+          }
+        }
+        toast({ title: "Processo excluído após remover cenários vinculados" });
+        await loadEntries();
+      } else {
+        // A remoção do cenário já pode ter excluído a fonte; tratar 404 como sucesso
+        try {
+          await apiDelete(`/api/kb/sources/${linkedTargetId}`);
+        } catch (err: any) {
+          if ((err as any)?.status !== 404) {
+            throw err;
+          }
+        }
+        toast({ title: "Fonte excluída após remover cenários vinculados" });
+        await loadSources("cliente", filterStatusCliente);
+        await loadSources("operador", filterStatusOperador);
+      }
+      resetLinkedDialog();
+    } catch (e: any) {
+      toast({
+        title: "Erro ao prosseguir exclusão",
+        description: String(e?.message || e),
+        variant: "destructive",
+      });
+      setLinkedDeleting(false);
     }
   }
 
@@ -552,7 +670,23 @@ export const KnowledgeBaseManager = () => {
       toast({ title: "Processo excluído" });
       loadEntries();
     } catch (error: any) {
-      // Se estiver em uso, abrir pop-up para Arquivar
+      // Bloqueio: processo vinculado a cenários
+      if ((error as any)?.status === 409 && (error as any)?.code === "KB_LINKED_SCENARIOS" && Array.isArray((error as any)?.scenarios)) {
+        setLinkedType('process');
+        setLinkedTargetId(id);
+        setLinkedScenarios(((error as any).scenarios || []).map((s: any) => ({
+          id: s.id,
+          title: s.title,
+          motivo_label: s.motivo_label,
+          status: s.status,
+        })));
+        const init: Record<string,'pending'> = {};
+        for (const s of ((error as any).scenarios || [])) init[s.id] = 'pending';
+        setLinkedDeleteStatus(init as any);
+        setShowLinkedDialog(true);
+        return;
+      }
+      // Se estiver em uso por conversas, abrir pop-up para Arquivar
       if ((error as any)?.status === 409 && (error as any)?.code === "KB_IN_USE") {
         const target = entries.find((e) => e.id === id) || null;
         setArchiveTarget(target);
@@ -1071,6 +1205,55 @@ export const KnowledgeBaseManager = () => {
                 onClick={() => archiveTarget && handleArchiveLegacy(archiveTarget.id)}
               >
                 Arquivar
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+
+        {/* Dialog: Conhecimento vinculado a cenários (remoção em massa dos cenários) */}
+        <AlertDialog open={showLinkedDialog} onOpenChange={(o) => { setShowLinkedDialog(o); if (!o) resetLinkedDialog(); }}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Conhecimento vinculado a cenários</AlertDialogTitle>
+              <AlertDialogDescription>
+                {linkedType === 'process' ? (
+                  <>Este processo operacional está vinculado aos cenários abaixo. Remova todos os cenários listados para prosseguir com a exclusão do processo.</>
+                ) : (
+                  <>Esta fonte de conhecimento (Operador) está vinculada aos cenários abaixo. Remova todos os cenários listados para prosseguir com a exclusão da fonte.</>
+                )}
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            {linkedScenarios.length > 0 ? (
+              <div className="mt-3 space-y-2">
+                {linkedScenarios.map((s) => (
+                  <div key={s.id} className="flex items-center justify-between text-sm">
+                    <div className="flex-1">
+                      <span className="font-medium text-foreground">{s.title}</span>
+                      <span className="ml-2 text-muted-foreground">({s.motivo_label})</span>
+                      <span className="ml-2 text-muted-foreground">• {s.status}</span>
+                    </div>
+                    <div className="text-xs">
+                      {linkedDeleteStatus[s.id] === 'pending' && <span className="text-muted-foreground">pendente</span>}
+                      {linkedDeleteStatus[s.id] === 'deleting' && <span className="text-foreground">removendo...</span>}
+                      {linkedDeleteStatus[s.id] === 'deleted' && <span className="text-green-600">removido</span>}
+                      {linkedDeleteStatus[s.id] === 'failed' && <span className="text-destructive">falhou</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="mt-3 text-sm text-muted-foreground">Nenhum cenário listado.</div>
+            )}
+            <AlertDialogFooter>
+              <AlertDialogCancel disabled={linkedDeleting} onClick={() => resetLinkedDialog()}>
+                Cancelar
+              </AlertDialogCancel>
+              <AlertDialogAction
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                disabled={linkedDeleting || linkedScenarios.length === 0}
+                onClick={removeLinkedScenariosAndProceed}
+              >
+                {linkedDeleting ? "Removendo cenários..." : "Remover cenários e prosseguir exclusão"}
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>
