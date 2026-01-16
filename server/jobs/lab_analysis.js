@@ -194,8 +194,8 @@ MotivoDeContato (CENÁRIO): ${motivo}
 TAREFAS:
 1) Proponha um título sucinto para o cenário (scenario_title) que um humano entenda.
 2) Liste de 1 a 4 perfis típicos de cliente (customer_profiles) em linguagem natural, ex.: ["Cliente Calmo", "Cliente Irritado"].
-3) Descreva de forma objetiva o PROCESSO esperado (process_text) que o atendente deveria seguir (passo a passo resumido, sem dados sensíveis).
-4) Liste DIRETRIZES objetivas para o atendente (operator_guidelines) como bullets, ex.: ["Saudar com empatia", "Confirmar dados de segurança"].
+3) Descreva de forma objetiva o PROCESSO esperado (process_text) que o cliente deveria seguir (passo a passo resumido, sem dados sensíveis).
+4) Liste DIRETRIZES objetivas para o cliente (operator_guidelines) como bullets, ex.: ["Saudar com empatia", "Confirmar dados de segurança"].
 5) Extraia PADRÕES recorrentes (patterns) sobre o atendimento ou o cliente, ex.: ["cliente costuma chegar sem documento X", "espera longa para validação"].
 
 FORMATO OBRIGATÓRIO (JSON estrito, sem comentários):

@@ -251,7 +251,7 @@ ${factsText}
 - OBJETIVO: Você quer resolver seu problema conforme o cenário, mas agindo como o perfil descrito.
 
 ### INÍCIO DA SIMULAÇÃO:
-A partir de agora, o texto recebido é a fala do atendente do banco. Responda estritamente como o cliente.`;
+A partir de agora, o texto recebido é a fala do atendente. Responda estritamente como o cliente.`;
 }
 
 function buildEvaluationPrompt({ transcript, scenario, customerProfile, operatorGuidelines = '' }) {

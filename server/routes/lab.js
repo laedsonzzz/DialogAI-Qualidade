@@ -455,6 +455,171 @@ export function labRoutes(pgClient) {
   });
 
   /**
+   * PATCH /api/lab/scenarios/results/:run_id/:motivo
+   * Atualiza parcialmente os campos do resultado agregado (lab_results) antes do commit.
+   * Body (qualquer combinação parcial):
+   * {
+   *   scenario_title?: string (<= 200 chars),
+   *   customer_profiles?: string[] (até 6 itens, cada um <= 200 chars),
+   *   process_text?: string|null (<= 10000 chars),
+   *   operator_guidelines?: string[] (até 20, <= 200 chars),
+   *   patterns?: string[] (até 20, <= 200 chars)
+   * }
+   * - Exige requireCanManageScenarios()
+   * - Valida que o run pertence ao cliente e que o motivo existe em lab_results
+   * - Normaliza valores (trim/limites), remove vazios e atualiza updated_at
+   * - Auditoria com before/after
+   */
+  router.patch('/scenarios/results/:run_id/:motivo', requireCanManageScenarios(), async (req, res) => {
+    try {
+      const { run_id, motivo } = req.params;
+
+      // Verifica se o run pertence ao cliente
+      const rr = await pgClient.query(
+        `SELECT id FROM public.lab_runs WHERE id = $1 AND client_id = $2`,
+        [run_id, req.clientId]
+      );
+      if (rr.rows.length === 0) {
+        return res.status(404).json({ error: 'Execução não encontrada neste cliente' });
+      }
+
+      // Carrega resultado existente para before/auditoria
+      const prev = await pgClient.query(
+        `SELECT motivo, scenario_title, customer_profiles, process_text, operator_guidelines, patterns, status
+           FROM public.lab_results
+          WHERE run_id = $1 AND client_id = $2 AND motivo = $3`,
+        [run_id, req.clientId, motivo]
+      );
+      if (prev.rows.length === 0) {
+        return res.status(404).json({ error: 'Resultado não encontrado para este motivo', code: 'RESULT_NOT_FOUND' });
+      }
+
+      const body = req.body || {};
+      const updates = {};
+
+      // scenario_title
+      if (Object.prototype.hasOwnProperty.call(body, 'scenario_title')) {
+        let v = body.scenario_title;
+        if (v === null) {
+          v = null;
+        } else if (typeof v !== 'string') {
+          return res.status(400).json({ error: 'scenario_title deve ser string', field: 'scenario_title' });
+        } else {
+          v = v.trim().slice(0, 200);
+        }
+        updates.scenario_title = v;
+      }
+
+      // helper para arrays de strings com limites
+      function normArrayField(val, name, maxItems) {
+        if (!Object.prototype.hasOwnProperty.call(body, name)) return undefined;
+        if (val === null) return [];
+        if (!Array.isArray(val)) {
+          const err = new Error(`${name} deve ser array de strings`);
+          err.status = 400;
+          throw err;
+        }
+        const out = [];
+        for (const it of val) {
+          if (typeof it !== 'string') continue;
+          const s = it.trim();
+          if (!s) continue;
+          out.push(s.slice(0, 200));
+          if (out.length >= maxItems) break;
+        }
+        return out;
+      }
+
+      try {
+        const customerProfiles = normArrayField(body.customer_profiles, 'customer_profiles', 6);
+        if (customerProfiles !== undefined) updates.customer_profiles = customerProfiles;
+      } catch (e) {
+        return res.status(e.status || 400).json({ error: e.message || String(e), field: 'customer_profiles' });
+      }
+
+      // process_text
+      if (Object.prototype.hasOwnProperty.call(body, 'process_text')) {
+        let v = body.process_text;
+        if (v === null) {
+          v = null;
+        } else if (typeof v !== 'string') {
+          return res.status(400).json({ error: 'process_text deve ser string', field: 'process_text' });
+        } else {
+          v = String(v).slice(0, 10000);
+        }
+        updates.process_text = v;
+      }
+
+      try {
+        const operatorGuidelines = normArrayField(body.operator_guidelines, 'operator_guidelines', 20);
+        if (operatorGuidelines !== undefined) updates.operator_guidelines = operatorGuidelines;
+      } catch (e) {
+        return res.status(e.status || 400).json({ error: e.message || String(e), field: 'operator_guidelines' });
+      }
+
+      try {
+        const patterns = normArrayField(body.patterns, 'patterns', 20);
+        if (patterns !== undefined) updates.patterns = patterns;
+      } catch (e) {
+        return res.status(e.status || 400).json({ error: e.message || String(e), field: 'patterns' });
+      }
+
+      if (Object.keys(updates).length === 0) {
+        return res.status(400).json({ error: 'Nenhum campo para atualizar', code: 'EMPTY_PAYLOAD' });
+      }
+
+      // Monta SET dinâmico apenas com campos enviados
+      const setCols = [];
+      const params = [run_id, req.clientId, motivo];
+      let idx = 4;
+
+      if (Object.prototype.hasOwnProperty.call(updates, 'scenario_title')) {
+        setCols.push(`scenario_title = $${idx++}`);
+        params.push(updates.scenario_title);
+      }
+      if (Object.prototype.hasOwnProperty.call(updates, 'customer_profiles')) {
+        setCols.push(`customer_profiles = $${idx++}::jsonb`);
+        params.push(JSON.stringify(updates.customer_profiles));
+      }
+      if (Object.prototype.hasOwnProperty.call(updates, 'process_text')) {
+        setCols.push(`process_text = $${idx++}`);
+        params.push(updates.process_text);
+      }
+      if (Object.prototype.hasOwnProperty.call(updates, 'operator_guidelines')) {
+        setCols.push(`operator_guidelines = $${idx++}::jsonb`);
+        params.push(JSON.stringify(updates.operator_guidelines));
+      }
+      if (Object.prototype.hasOwnProperty.call(updates, 'patterns')) {
+        setCols.push(`patterns = $${idx++}::jsonb`);
+        params.push(JSON.stringify(updates.patterns));
+      }
+      setCols.push(`updated_at = now()`);
+
+      const sql = `UPDATE public.lab_results
+                      SET ${setCols.join(', ')}
+                    WHERE run_id = $1 AND client_id = $2 AND motivo = $3`;
+      const upd = await pgClient.query(sql, params);
+      if (upd.rowCount === 0) {
+        return res.status(404).json({ error: 'Resultado não encontrado para este motivo', code: 'RESULT_NOT_FOUND' });
+      }
+
+      // Auditoria
+      await writeAudit(pgClient, req, {
+        entityType: 'lab_results',
+        entityId: `${run_id}:${motivo}`,
+        action: 'update',
+        before: prev.rows[0],
+        after: { ...prev.rows[0], ...updates },
+      });
+
+      return res.json({ ok: true });
+    } catch (err) {
+      console.error('Lab update result error:', err);
+      return res.status(500).json({ error: 'Erro ao atualizar resultado' });
+    }
+  });
+
+  /**
    * POST /api/lab/scenarios/commit
    * Body: { run_id, motivo }
    * - Valida existência de run e resultado pronto

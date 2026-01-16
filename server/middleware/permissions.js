@@ -46,6 +46,10 @@ export function requireCanViewAllClientChats() {
 
 export function requireCanManageScenarios() {
   return function (req, res, next) {
+    // Admin bypass: administradores podem gerenciar cenários independentemente do flag
+    if (req.user && req.user.is_admin === true) {
+      return next();
+    }
     const err = ensurePerm(req, res, 'can_manage_scenarios');
     if (err) return;
     return next();

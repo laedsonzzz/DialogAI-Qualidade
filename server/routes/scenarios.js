@@ -122,17 +122,34 @@ export function scenariosRoutes(pgClient) {
       const scenario = prev.rows[0];
 
       // Verificar referências em conversas (inclui conversas soft-deletadas)
-      const ref = await pgClient.query(
-        `SELECT COUNT(*)::int AS cnt
-           FROM public.conversations
-          WHERE client_id = $1 AND scenario_id = $2`,
-        [req.clientId, id]
-      );
-      if ((ref.rows[0]?.cnt ?? 0) > 0) {
+      // Diagnóstico: em algumas instalações, a tabela "conversations" não possui a coluna scenario_id.
+      // Nesses casos, fazemos fallback para comparar pelo campo textual "scenario" (título).
+      let refCount = 0;
+      try {
+        const ref = await pgClient.query(
+          `SELECT COUNT(*)::int AS cnt
+             FROM public.conversations
+            WHERE client_id = $1 AND scenario_id = $2`,
+          [req.clientId, id]
+        );
+        refCount = ref.rows[0]?.cnt ?? 0;
+        console.debug('Verificação de referências por scenario_id concluída', { scenario_id: id, refCount });
+      } catch (e) {
+        // Fallback: coluna scenario_id ausente -> contar por título do cenário (campo textual "scenario")
+        console.warn('Fallback: conversations.scenario_id ausente; verificando referências por título do cenário.', { scenario_id: id, title: scenario.title });
+        const refByTitle = await pgClient.query(
+          `SELECT COUNT(*)::int AS cnt
+             FROM public.conversations
+            WHERE client_id = $1 AND scenario = $2`,
+          [req.clientId, scenario.title]
+        );
+        refCount = refByTitle.rows[0]?.cnt ?? 0;
+      }
+      if (refCount > 0) {
         return res.status(409).json({
           error: 'Cenário em uso em conversas. Arquive para ocultar sem remover histórico.',
           code: 'SCENARIO_IN_USE',
-          referencedCount: ref.rows[0].cnt
+          referencedCount: refCount
         });
       }
       

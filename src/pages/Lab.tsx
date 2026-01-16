@@ -4,6 +4,7 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Progress } from "@/components/ui/progress";
 import { useToast } from "@/hooks/use-toast";
 import { getAuthHeader, getClientId, getCommonHeaders } from "@/lib/auth";
@@ -77,6 +78,16 @@ const Lab: React.FC = () => {
   const [authChecked, setAuthChecked] = useState(false);
   const [canManage, setCanManage] = useState(false);
   const [maxPerMotivo, setMaxPerMotivo] = useState<string>("");
+  // Edição de resultados por motivo
+  const [editing, setEditing] = useState<Record<string, boolean>>({});
+  const [saving, setSaving] = useState<Record<string, boolean>>({});
+  const [editForm, setEditForm] = useState<Record<string, {
+    scenario_title: string;
+    process_text: string;
+    customer_profiles: string[];
+    operator_guidelines: string[];
+    patterns: string[];
+  }>>({});
 
   // Preview/mapeamento de colunas
   const requiredCanonicals = useMemo(() => ([
@@ -394,6 +405,99 @@ const Lab: React.FC = () => {
     }
   }
 
+  // Helpers de edição
+  function startEdit(motivo: string, r: LabResultItem) {
+    const initial: any = {
+      scenario_title: String(r.scenario_title || r.motivo || ""),
+      process_text: String(r.process_text || ""),
+      customer_profiles: Array.isArray(r.customer_profiles) ? [...r.customer_profiles] : [],
+      operator_guidelines: Array.isArray(r.operator_guidelines) ? [...r.operator_guidelines] : [],
+      patterns: Array.isArray(r.patterns) ? [...r.patterns] : [],
+    };
+    setEditForm((prev) => ({ ...prev, [motivo]: initial }));
+    setEditing((prev) => ({ ...prev, [motivo]: true }));
+  }
+
+  function cancelEdit(motivo: string) {
+    setEditing((prev) => ({ ...prev, [motivo]: false }));
+    setEditForm((prev) => {
+      const next = { ...prev };
+      delete next[motivo];
+      return next;
+    });
+  }
+
+  function updateFormField(motivo: string, key: keyof typeof editForm[string], value: any) {
+    setEditForm((prev) => {
+      const curr = prev[motivo] || { scenario_title: "", process_text: "", customer_profiles: [], operator_guidelines: [], patterns: [] };
+      return { ...prev, [motivo]: { ...curr, [key]: value } };
+    });
+  }
+
+  function updateListItem(motivo: string, key: "customer_profiles" | "operator_guidelines" | "patterns", idx: number, value: string) {
+    setEditForm((prev) => {
+      const curr = prev[motivo] || { scenario_title: "", process_text: "", customer_profiles: [], operator_guidelines: [], patterns: [] };
+      const arr = Array.isArray(curr[key]) ? [...curr[key]] : [];
+      arr[idx] = value;
+      return { ...prev, [motivo]: { ...curr, [key]: arr } };
+    });
+  }
+
+  function addListItem(motivo: string, key: "customer_profiles" | "operator_guidelines" | "patterns") {
+    setEditForm((prev) => {
+      const curr = prev[motivo] || { scenario_title: "", process_text: "", customer_profiles: [], operator_guidelines: [], patterns: [] };
+      const arr = Array.isArray(curr[key]) ? [...curr[key]] : [];
+      arr.push("");
+      return { ...prev, [motivo]: { ...curr, [key]: arr } };
+    });
+  }
+
+  function removeListItem(motivo: string, key: "customer_profiles" | "operator_guidelines" | "patterns", idx: number) {
+    setEditForm((prev) => {
+      const curr = prev[motivo] || { scenario_title: "", process_text: "", customer_profiles: [], operator_guidelines: [], patterns: [] };
+      const arr = Array.isArray(curr[key]) ? [...curr[key]] : [];
+      arr.splice(idx, 1);
+      return { ...prev, [motivo]: { ...curr, [key]: arr } };
+    });
+  }
+
+  async function saveEdit(motivo: string) {
+    if (!runId) return;
+    const curr = editForm[motivo];
+    if (!curr) return;
+
+    // Monta payload respeitando limites (validados também no backend)
+    const payload: any = {
+      scenario_title: (curr.scenario_title || "").trim(),
+      process_text: typeof curr.process_text === "string" ? curr.process_text : null,
+      customer_profiles: (curr.customer_profiles || []).map((s) => String(s || "").trim()).filter(Boolean).slice(0, 6),
+      operator_guidelines: (curr.operator_guidelines || []).map((s) => String(s || "").trim()).filter(Boolean).slice(0, 20),
+      patterns: (curr.patterns || []).map((s) => String(s || "").trim()).filter(Boolean).slice(0, 20),
+    };
+
+    // Evita enviar campos vazios iguais ao original? Opcional: enviar todos
+    setSaving((prev) => ({ ...prev, [motivo]: true }));
+    try {
+      const res = await fetch(`${API_BASE}/api/lab/scenarios/results/${encodeURIComponent(runId)}/${encodeURIComponent(motivo)}`, {
+        method: "PATCH",
+        headers: getCommonHeaders(),
+        body: JSON.stringify(payload),
+      });
+      const txt = await res.text();
+      if (!res.ok) {
+        let j: any; try { j = JSON.parse(txt); } catch {}
+        throw new Error(j?.error || `Erro HTTP ${res.status}`);
+      }
+      toast({ title: "Resultados atualizados", description: `Motivo "${motivo}" salvo com sucesso.` });
+      await loadResults();
+      cancelEdit(motivo);
+    } catch (e: any) {
+      toast({ title: "Erro ao salvar edições", description: String(e?.message || e), variant: "destructive" });
+    } finally {
+      setSaving((prev) => ({ ...prev, [motivo]: false }));
+    }
+  }
+
   async function handleCommit(motivo: string) {
     if (!runId) return;
     try {
@@ -623,64 +727,199 @@ const Lab: React.FC = () => {
 
           <div className="mt-4 grid gap-4">
             {results.map((r) => {
-              const isCommitted = committed.has(r.motivo);
-              const committingNow = committing[r.motivo];
+              const motivo = r.motivo;
+              const isCommitted = committed.has(motivo);
+              const committingNow = committing[motivo];
               const canCommit = String(r.status || "").toLowerCase() === "ready";
+              const isEditing = !!editing[motivo];
+              const isSaving = !!saving[motivo];
+              const form = editForm[motivo];
+
               return (
-                <Card key={r.motivo} className="p-3">
+                <Card key={motivo} className="p-3">
                   <div className="flex items-center justify-between">
                     <div>
-                      <div className="font-semibold">{r.scenario_title || r.motivo}</div>
-                      <div className="text-xs text-muted-foreground">Motivo: {r.motivo}</div>
+                      <div className="font-semibold">
+                        {isEditing ? (
+                          <Input
+                            value={form?.scenario_title ?? (r.scenario_title || r.motivo || "")}
+                            onChange={(e) => updateFormField(motivo, "scenario_title", e.target.value)}
+                          />
+                        ) : (
+                          r.scenario_title || r.motivo
+                        )}
+                      </div>
+                      <div className="text-xs text-muted-foreground">Motivo: {motivo}</div>
                       <div className="text-xs text-muted-foreground">Status: {r.status || "-"}</div>
                       {r.updated_at && <div className="text-xs text-muted-foreground">Atualizado: {new Date(r.updated_at).toLocaleString()}</div>}
                     </div>
                     <div className="flex items-center gap-2">
+                      {!isEditing && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => startEdit(motivo, r)}
+                        >
+                          Editar
+                        </Button>
+                      )}
+                      {isEditing && (
+                        <>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => cancelEdit(motivo)}
+                            disabled={isSaving}
+                          >
+                            Descartar
+                          </Button>
+                          <Button
+                            size="sm"
+                            onClick={() => saveEdit(motivo)}
+                            disabled={isSaving}
+                          >
+                            {isSaving ? "Salvando..." : "Salvar alterações"}
+                          </Button>
+                        </>
+                      )}
                       <Button
                         variant={isCommitted ? "outline" : "default"}
-                        disabled={!canCommit || committingNow || isCommitted}
-                        onClick={() => handleCommit(r.motivo)}
+                        disabled={!canCommit || committingNow || isCommitted || isEditing}
+                        onClick={() => handleCommit(motivo)}
                       >
                         {isCommitted ? "Commitado" : committingNow ? "Commitando..." : "Commit"}
                       </Button>
                     </div>
                   </div>
 
+                  {/* Perfis de Cliente */}
                   <div className="grid md:grid-cols-2 gap-3 mt-3">
                     <div className="grid gap-2">
                       <div className="font-medium">Perfis de Cliente</div>
-                      {Array.isArray(r.customer_profiles) && r.customer_profiles.length > 0 ? (
-                        <ul className="list-disc list-inside text-sm text-muted-foreground">
-                          {r.customer_profiles.map((p, i) => <li key={i}>{p}</li>)}
-                        </ul>
+                      {isEditing ? (
+                        <div className="grid gap-2">
+                          {(form?.customer_profiles || []).map((p, i) => (
+                            <div key={`cp-${motivo}-${i}`} className="flex gap-2">
+                              <Input
+                                value={p}
+                                onChange={(e) => updateListItem(motivo, "customer_profiles", i, e.target.value)}
+                              />
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => removeListItem(motivo, "customer_profiles", i)}
+                              >
+                                Remover
+                              </Button>
+                            </div>
+                          ))}
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => addListItem(motivo, "customer_profiles")}
+                            disabled={(form?.customer_profiles || []).length >= 6}
+                          >
+                            Adicionar Perfil
+                          </Button>
+                        </div>
                       ) : (
-                        <p className="text-sm text-muted-foreground">Nenhum perfil.</p>
+                        Array.isArray(r.customer_profiles) && r.customer_profiles.length > 0 ? (
+                          <ul className="list-disc list-inside text-sm text-muted-foreground">
+                            {r.customer_profiles.map((p, i) => <li key={i}>{p}</li>)}
+                          </ul>
+                        ) : (
+                          <p className="text-sm text-muted-foreground">Nenhum perfil.</p>
+                        )
                       )}
                     </div>
+
+                    {/* Diretrizes do Atendente */}
                     <div className="grid gap-2">
                       <div className="font-medium">Diretrizes do Atendente</div>
-                      {Array.isArray(r.operator_guidelines) && r.operator_guidelines.length > 0 ? (
-                        <ul className="list-disc list-inside text-sm text-muted-foreground">
-                          {r.operator_guidelines.map((g, i) => <li key={i}>{g}</li>)}
-                        </ul>
+                      {isEditing ? (
+                        <div className="grid gap-2">
+                          {(form?.operator_guidelines || []).map((g, i) => (
+                            <div key={`og-${motivo}-${i}`} className="flex gap-2">
+                              <Input
+                                value={g}
+                                onChange={(e) => updateListItem(motivo, "operator_guidelines", i, e.target.value)}
+                              />
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => removeListItem(motivo, "operator_guidelines", i)}
+                              >
+                                Remover
+                              </Button>
+                            </div>
+                          ))}
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => addListItem(motivo, "operator_guidelines")}
+                            disabled={(form?.operator_guidelines || []).length >= 20}
+                          >
+                            Adicionar Diretriz
+                          </Button>
+                        </div>
                       ) : (
-                        <p className="text-sm text-muted-foreground">Nenhuma diretriz.</p>
+                        Array.isArray(r.operator_guidelines) && r.operator_guidelines.length > 0 ? (
+                          <ul className="list-disc list-inside text-sm text-muted-foreground">
+                            {r.operator_guidelines.map((g, i) => <li key={i}>{g}</li>)}
+                          </ul>
+                        ) : (
+                          <p className="text-sm text-muted-foreground">Nenhuma diretriz.</p>
+                        )
                       )}
                     </div>
                   </div>
 
+                  {/* Processo */}
                   <div className="grid gap-2 mt-3">
                     <div className="font-medium">Processo (Resumo)</div>
-                    {r.process_text ? (
+                    {isEditing ? (
+                      <Textarea
+                        value={form?.process_text ?? (r.process_text || "")}
+                        onChange={(e) => updateFormField(motivo, "process_text", e.target.value)}
+                        className="min-h-[120px]"
+                      />
+                    ) : r.process_text ? (
                       <div className="text-sm text-muted-foreground whitespace-pre-wrap">{r.process_text}</div>
                     ) : (
                       <p className="text-sm text-muted-foreground">Sem processo extraído.</p>
                     )}
                   </div>
 
+                  {/* Padrões */}
                   <div className="grid gap-2 mt-3">
                     <div className="font-medium">Padrões</div>
-                    {Array.isArray(r.patterns) && r.patterns.length > 0 ? (
+                    {isEditing ? (
+                      <div className="grid gap-2">
+                        {(form?.patterns || []).map((p, i) => (
+                          <div key={`pt-${motivo}-${i}`} className="flex gap-2">
+                            <Input
+                              value={p}
+                              onChange={(e) => updateListItem(motivo, "patterns", i, e.target.value)}
+                            />
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => removeListItem(motivo, "patterns", i)}
+                            >
+                              Remover
+                            </Button>
+                          </div>
+                        ))}
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => addListItem(motivo, "patterns")}
+                          disabled={(form?.patterns || []).length >= 20}
+                        >
+                          Adicionar Padrão
+                        </Button>
+                      </div>
+                    ) : Array.isArray(r.patterns) && r.patterns.length > 0 ? (
                       <ul className="list-disc list-inside text-sm text-muted-foreground">
                         {r.patterns.map((p, i) => <li key={i}>{p}</li>)}
                       </ul>
